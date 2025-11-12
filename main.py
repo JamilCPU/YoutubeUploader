@@ -16,7 +16,7 @@ class YouTubeUploader:
     Manages the file watcher and coordinates between components.
     """
     
-    def __init__(self, watchDirectory=None, checkInterval=30):
+    def __init__(self, watchDirectory=None, checkInterval=300):
         """
         Initialize the YouTube uploader.
         
