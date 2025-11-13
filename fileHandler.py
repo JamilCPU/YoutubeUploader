@@ -77,10 +77,10 @@ class NewFileHandler(FileSystemEventHandler):
         print(f"Recording finished: {filePath}")
         
         if self.uploader:
-            # Generate title from current date in MM/DD/YYYY format
+            # Generate title from current date and time in MM/DD/YYYY - HH:MMam/pm format
             from datetime import datetime
             currentDate = datetime.now()
-            title = currentDate.strftime("%m/%d/%Y")
+            title = currentDate.strftime("%m/%d/%Y - %I:%M%p").replace("AM", "am").replace("PM", "pm")
             
             # Upload to YouTube
             print(f"Starting upload to YouTube...")
