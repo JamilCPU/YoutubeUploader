@@ -10,7 +10,7 @@ class NewFileHandler(FileSystemEventHandler):
 
     """
     
-    def __init__(self, checkInterval=300, uploader=None):
+    def __init__(self, checkInterval=120, uploader=None):
         """
         Initialize the handler.
         
