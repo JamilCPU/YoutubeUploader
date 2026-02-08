@@ -1,7 +1,11 @@
+import logging
 import threading
 import time
 from pathlib import Path
 from watchdog.events import FileSystemEventHandler
+
+# Set up logger
+logger = logging.getLogger(__name__)
 
 
 class NewFileHandler(FileSystemEventHandler):
@@ -35,6 +39,8 @@ class NewFileHandler(FileSystemEventHandler):
         self.running = True
         self.pollThread = threading.Thread(target=self._pollFile, daemon=True)
         self.pollThread.start()
+        
+        logger.info(f"FileHandler initialized with checkInterval={checkInterval} seconds")
     
     @property
     def status(self):
@@ -62,9 +68,13 @@ class NewFileHandler(FileSystemEventHandler):
             try:
                 filePath = Path(self.currentFile)
                 if filePath.exists():
-                    return filePath.stat().st_size
+                    size = filePath.stat().st_size
+                    logger.debug(f"File size check: {self.currentFile} = {size} bytes")
+                    return size
+                logger.warning(f"File does not exist: {self.currentFile}")
                 return None
-            except Exception:
+            except Exception as e:
+                logger.error(f"Error getting file size for {self.currentFile}: {e}")
                 return None
     
     def setFileToTrack(self, filePath):
@@ -75,41 +85,84 @@ class NewFileHandler(FileSystemEventHandler):
             filePath: Path to the file to track (string or Path)
         """
         filePath = str(filePath)
+        logger.info(f"Setting file to track: {filePath}")
+        
+        # Get the file's actual modification time
+        try:
+            filePathObj = Path(filePath)
+            if not filePathObj.exists():
+                logger.error(f"File does not exist: {filePath}")
+                raise FileNotFoundError(f"File does not exist: {filePath}")
+            
+            actualModTime = filePathObj.stat().st_mtime
+        except Exception as e:
+            logger.error(f"Error getting file modification time for {filePath}: {e}")
+            raise
+        
         with self.lock:
             if self.currentFile is not None:
+                logger.warning(f"Already tracking {self.currentFile}, switching to {filePath}")
                 print(f"Warning: Already tracking {self.currentFile}, switching to {filePath}")
             
             currentTime = time.time()
             self.currentFile = filePath
-            self.lastModified = currentTime
-            self.lastCheckTime = currentTime
+            self.lastModified = actualModTime  # Use actual file modification time
+            self.lastCheckTime = currentTime  # Use current time for check reference
             self._status = "watching"
+            
+            logger.info(f"Started tracking file: {filePath} (checkInterval={self.checkInterval}s, modTime={actualModTime})")
             print(f"Tracking file: {filePath}")
             
-            if self.statusCallback:
-                self.statusCallback("watching")
-            
-            # Get initial file size
-            if self.fileSizeCallback:
-                size = self.getFileSize()
-                if size is not None:
-                    self.fileSizeCallback(filePath, size)
+            # Call callbacks outside the lock to avoid blocking
+            statusCallback = self.statusCallback
+            fileSizeCallback = self.fileSizeCallback
+        
+        # Call callbacks outside the lock to prevent blocking GUI thread
+        if statusCallback:
+            statusCallback("watching")
+        
+        # Get initial file size
+        if fileSizeCallback:
+            size = self.getFileSize()
+            if size is not None:
+                logger.info(f"Initial file size: {filePath} = {size} bytes")
+                fileSizeCallback(filePath, size)
     
     def _setStatus(self, newStatus):
         """Set status and notify callback if available."""
         with self.lock:
             if self._status != newStatus:
+                oldStatus = self._status
                 self._status = newStatus
+                logger.info(f"Status changed: {oldStatus} -> {newStatus}")
                 if self.statusCallback:
                     self.statusCallback(newStatus)
+    
+    def checkFileNow(self):
+        """
+        Manually trigger a file check (for GUI button).
+        This allows users to check if the file is still being written without waiting for the interval.
+        """
+        logger.info("Manual file check triggered")
+        self._checkFile()
+        # Also update file size if callback is available
+        if self.fileSizeCallback:
+            with self.lock:
+                if self.currentFile is not None:
+                    size = self.getFileSize()
+                    if size is not None:
+                        logger.debug(f"Manual file size update: {self.currentFile} = {size} bytes")
+                        self.fileSizeCallback(self.currentFile, size)
     
     def _pollFile(self):
         """
         Background thread that checks the file every checkInterval seconds.
         """
+        logger.info(f"Polling thread started (checkInterval={self.checkInterval}s)")
         while self.running:
             time.sleep(self.checkInterval)
             if self.running:  # Check again in case we stopped during sleep
+                logger.debug(f"Performing periodic check (interval={self.checkInterval}s)")
                 self._checkFile()
                 # Update file size callback every check interval
                 if self.fileSizeCallback:
@@ -117,6 +170,7 @@ class NewFileHandler(FileSystemEventHandler):
                         if self.currentFile is not None:
                             size = self.getFileSize()
                             if size is not None:
+                                logger.debug(f"Periodic file size update: {self.currentFile} = {size} bytes")
                                 self.fileSizeCallback(self.currentFile, size)
     
     def _checkFile(self):
@@ -127,34 +181,54 @@ class NewFileHandler(FileSystemEventHandler):
         """
         with self.lock:
             if self.currentFile is None:
+                logger.debug("No file being tracked, skipping check")
                 return  # No file being tracked
             
-            currentTime = time.time()
-            timeSinceLastMod = currentTime - self.lastModified
-            
-            # Check if file was modified since we last checked
-            if self.lastModified > self.lastCheckTime:
-                # File was modified, update check time and wait another interval
-                self.lastCheckTime = currentTime
-                print(f"File still being written: {self.currentFile}")
-                print(f"  Last modified: {timeSinceLastMod:.1f}s ago, will check again in {self.checkInterval} seconds")
-            else:
-                # File hasn't been modified, it's finished
-                filePath = self.currentFile
-                self.currentFile = None
-                self.lastModified = None
-                self.lastCheckTime = None
-                self._status = "finished"
+            # Get the file's actual modification time from the filesystem
+            try:
+                filePath = Path(self.currentFile)
+                if not filePath.exists():
+                    logger.warning(f"File no longer exists: {self.currentFile}")
+                    return
                 
-                print(f"File finished! No modifications for {timeSinceLastMod:.1f}s")
-                # Process outside the lock
-                self._onFileFinished(filePath)
+                # Get the file's actual modification time
+                actualModTime = filePath.stat().st_mtime
+                currentTime = time.time()
+                timeSinceLastMod = currentTime - actualModTime
+                
+                logger.debug(f"Checking file: {self.currentFile}, actualModTime={actualModTime}, lastCheckTime={self.lastCheckTime}, lastModified={self.lastModified}")
+                
+                # Check if file was modified since we last checked
+                # Compare actual file mod time with last known mod time
+                if actualModTime > self.lastModified:
+                    # File was modified, update mod time and check time, wait another interval
+                    self.lastModified = actualModTime
+                    self.lastCheckTime = currentTime
+                    logger.info(f"File still being written: {self.currentFile} (modified {timeSinceLastMod:.1f}s ago, will check again in {self.checkInterval}s)")
+                    print(f"File still being written: {self.currentFile}")
+                    print(f"  Last modified: {timeSinceLastMod:.1f}s ago, will check again in {self.checkInterval} seconds")
+                else:
+                    # File hasn't been modified, it's finished
+                    filePath = self.currentFile
+                    self.currentFile = None
+                    self.lastModified = None
+                    self.lastCheckTime = None
+                    self._status = "finished"
+                    
+                    logger.info(f"File finished writing: {filePath} (no modifications for {timeSinceLastMod:.1f}s)")
+                    print(f"File finished! No modifications for {timeSinceLastMod:.1f}s")
+                    # Process outside the lock
+                    self._onFileFinished(filePath)
+            except Exception as e:
+                logger.error(f"Error checking file {self.currentFile}: {e}", exc_info=True)
+                return
     
     def _onFileFinished(self, filePath):
         """
         Called when a file has finished being written to.
         Uploads the file to YouTube if an uploader is configured.
         """
+        logger.info(f"Recording finished: {filePath}")
         print(f"Recording finished: {filePath}")
         
         if self.uploader:
@@ -167,6 +241,7 @@ class NewFileHandler(FileSystemEventHandler):
             title = currentDate.strftime("%m/%d/%Y - %I:%M%p").replace("AM", "am").replace("PM", "pm")
             
             # Upload to YouTube
+            logger.info(f"Starting upload to YouTube: {filePath}")
             print(f"Starting upload to YouTube...")
             videoId = self.uploader.uploadVideo(
                 videoPath=filePath,
@@ -176,12 +251,15 @@ class NewFileHandler(FileSystemEventHandler):
             )
             
             if videoId:
+                logger.info(f"Successfully uploaded video: {videoId}")
                 print(f"Successfully uploaded video: {videoId}")
                 self._setStatus("finished")
             else:
+                logger.error(f"Failed to upload video: {filePath}")
                 print("Failed to upload video")
                 self._setStatus("idle")
         else:
+            logger.warning("No uploader configured, skipping upload")
             print("No uploader configured, skipping upload")
             self._setStatus("idle")
     
@@ -192,11 +270,13 @@ class NewFileHandler(FileSystemEventHandler):
         """
         if not event.is_directory:
             filePath = event.src_path
+            logger.info(f"New file created (directory watch): {filePath}")
             print(f"Recording started: {filePath}")
             
             with self.lock:
                 # If we're already tracking a file, warn and replace it
                 if self.currentFile is not None:
+                    logger.warning(f"Already tracking {self.currentFile}, switching to {filePath}")
                     print(f"Warning: Already tracking {self.currentFile}, switching to {filePath}")
                 
                 # Start tracking this file with current timestamp
@@ -205,6 +285,8 @@ class NewFileHandler(FileSystemEventHandler):
                 self.lastModified = currentTime
                 self.lastCheckTime = currentTime
                 self._status = "watching"
+                
+                logger.info(f"Started tracking file from directory watch: {filePath} (checkInterval={self.checkInterval}s)")
                 print(f"Tracking file. Will check in {self.checkInterval} seconds if recording is finished.")
                 
                 if self.statusCallback:
@@ -214,6 +296,7 @@ class NewFileHandler(FileSystemEventHandler):
                 if self.fileSizeCallback:
                     size = self.getFileSize()
                     if size is not None:
+                        logger.info(f"Initial file size from directory watch: {filePath} = {size} bytes")
                         self.fileSizeCallback(filePath, size)
     
     def on_modified(self, event):
@@ -226,10 +309,14 @@ class NewFileHandler(FileSystemEventHandler):
             with self.lock:
                 if filePath == self.currentFile:
                     # Update the timestamp - very cheap operation
+                    oldTime = self.lastModified
                     self.lastModified = time.time()
+                    logger.debug(f"File modified event: {filePath} (timestamp updated: {oldTime} -> {self.lastModified})")
+                    
                     # Optionally update file size on modification
                     if self.fileSizeCallback:
                         size = self.getFileSize()
                         if size is not None:
+                            logger.debug(f"File size update from modification event: {filePath} = {size} bytes")
                             self.fileSizeCallback(filePath, size)
 

@@ -3,6 +3,7 @@ PySide6 GUI for YouTube Uploader application.
 Provides a modern desktop interface for selecting files/directories to watch
 and monitoring upload progress.
 """
+import logging
 import sys
 from pathlib import Path
 from PySide6.QtWidgets import (
@@ -15,6 +16,9 @@ from PySide6.QtGui import QFont
 
 from main import YouTubeUploader
 from fileHandler import NewFileHandler
+
+# Set up logger
+logger = logging.getLogger(__name__)
 
 
 class StatusSignals(QObject):
@@ -128,12 +132,16 @@ class YouTubeUploaderGUI(QMainWindow):
         controlLayout = QHBoxLayout()
         self.startBtn = QPushButton("Start")
         self.stopBtn = QPushButton("Stop")
+        self.checkNowBtn = QPushButton("Check Now")
         self.startBtn.clicked.connect(self.startWatching)
         self.stopBtn.clicked.connect(self.stopWatching)
+        self.checkNowBtn.clicked.connect(self.checkFileNow)
         self.stopBtn.setEnabled(False)
+        self.checkNowBtn.setEnabled(False)
         
         controlLayout.addWidget(self.startBtn)
         controlLayout.addWidget(self.stopBtn)
+        controlLayout.addWidget(self.checkNowBtn)
         layout.addLayout(controlLayout)
         
         # Add stretch to push everything to top
@@ -141,6 +149,7 @@ class YouTubeUploaderGUI(QMainWindow):
     
     def selectDirectory(self):
         """Open directory selection dialog."""
+        logger.info("Opening directory selection dialog")
         directory = QFileDialog.getExistingDirectory(
             self,
             "Select Directory to Watch",
@@ -148,11 +157,15 @@ class YouTubeUploaderGUI(QMainWindow):
         )
         if directory:
             self.selectedPath = Path(directory)
+            logger.info(f"Directory selected: {self.selectedPath}")
             self.pathLabel.setText(f"Directory: {self.selectedPath}")
             self.directoryRadio.setChecked(True)
+        else:
+            logger.debug("Directory selection cancelled")
     
     def selectFile(self):
         """Open file selection dialog."""
+        logger.info("Opening file selection dialog")
         filePath, _ = QFileDialog.getOpenFileName(
             self,
             "Select File to Watch",
@@ -161,18 +174,23 @@ class YouTubeUploaderGUI(QMainWindow):
         )
         if filePath:
             self.selectedPath = Path(filePath)
+            logger.info(f"File selected: {self.selectedPath}")
             self.pathLabel.setText(f"File: {self.selectedPath.name}")
             self.fileRadio.setChecked(True)
+        else:
+            logger.debug("File selection cancelled")
     
     def startWatching(self):
         """Start watching the selected file or directory."""
         if not hasattr(self, 'selectedPath'):
+            logger.warning("Attempted to start watching without selecting a file or directory")
             QMessageBox.warning(self, "No Selection", "Please select a file or directory first.")
             return
         
         try:
             if self.directoryRadio.isChecked():
                 # Directory watching mode
+                logger.info(f"Starting directory watch mode: {self.selectedPath}")
                 self.uploader.startWatchingDirectory(
                     str(self.selectedPath),
                     statusCallback=self._statusCallback,
@@ -181,8 +199,10 @@ class YouTubeUploaderGUI(QMainWindow):
                 )
                 self.observer = self.uploader.observer
                 self.eventHandler = self.uploader.eventHandler
+                logger.info(f"Directory watch started successfully: {self.selectedPath}")
             else:
                 # File watching mode
+                logger.info(f"Starting file watch mode: {self.selectedPath}")
                 self.uploader.startWatchingFile(
                     str(self.selectedPath),
                     statusCallback=self._statusCallback,
@@ -192,26 +212,50 @@ class YouTubeUploaderGUI(QMainWindow):
                 self.eventHandler = self.uploader.eventHandler
                 self.observer = None  # No observer in file mode
                 self.currentFile = str(self.selectedPath)
+                logger.info(f"File watch started successfully: {self.selectedPath}")
                 self.updateFileSize()
             
             self.startBtn.setEnabled(False)
             self.stopBtn.setEnabled(True)
+            self.checkNowBtn.setEnabled(True)
             self.selectDirectoryBtn.setEnabled(False)
             self.selectFileBtn.setEnabled(False)
             self.directoryRadio.setEnabled(False)
             self.fileRadio.setEnabled(False)
             
         except Exception as e:
+            logger.error(f"Failed to start watching: {str(e)}", exc_info=True)
             QMessageBox.critical(self, "Error", f"Failed to start watching: {str(e)}")
+    
+    def checkFileNow(self):
+        """Manually trigger a file check."""
+        if not self.eventHandler:
+            logger.warning("Attempted to check file but no event handler is active")
+            QMessageBox.warning(self, "Not Watching", "Please start watching a file or directory first.")
+            return
+        
+        logger.info("Manual file check triggered by user")
+        try:
+            self.eventHandler.checkFileNow()
+            # Update file size display immediately
+            self.updateFileSize()
+            QMessageBox.information(self, "Check Complete", "File check completed. See status display for results.")
+        except Exception as e:
+            logger.error(f"Error during manual file check: {e}", exc_info=True)
+            QMessageBox.critical(self, "Check Error", f"Error checking file: {str(e)}")
     
     def stopWatching(self):
         """Stop watching and clean up."""
+        logger.info("Stopping file/directory watch")
+        
         if self.observer:
+            logger.debug("Stopping directory observer")
             self.observer.stop()
             self.observer.join()
             self.observer = None
         
         if self.eventHandler:
+            logger.debug("Stopping event handler")
             self.eventHandler.running = False
             self.eventHandler = None
         
@@ -220,8 +264,11 @@ class YouTubeUploaderGUI(QMainWindow):
         self.currentStatus = "idle"
         self.updateStatusDisplay()
         
+        logger.info("Watch stopped successfully")
+        
         self.startBtn.setEnabled(True)
         self.stopBtn.setEnabled(False)
+        self.checkNowBtn.setEnabled(False)
         self.selectDirectoryBtn.setEnabled(True)
         self.selectFileBtn.setEnabled(True)
         self.directoryRadio.setEnabled(True)
@@ -273,6 +320,7 @@ class YouTubeUploaderGUI(QMainWindow):
         if self.eventHandler and self.eventHandler.currentFilePath:
             size = self.eventHandler.getFileSize()
             if size is not None:
+                logger.debug(f"Timer-based file size update: {self.eventHandler.currentFilePath} = {size} bytes")
                 self.currentFileSize = size
                 self.currentFile = self.eventHandler.currentFilePath
                 self.updateStatusDisplay()
