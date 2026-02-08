@@ -165,13 +165,18 @@ class NewFileHandler(FileSystemEventHandler):
                 logger.debug(f"Performing periodic check (interval={self.checkInterval}s)")
                 self._checkFile()
                 # Update file size callback every check interval
-                if self.fileSizeCallback:
-                    with self.lock:
-                        if self.currentFile is not None:
-                            size = self.getFileSize()
-                            if size is not None:
-                                logger.debug(f"Periodic file size update: {self.currentFile} = {size} bytes")
-                                self.fileSizeCallback(self.currentFile, size)
+                # Get file info outside lock to avoid blocking
+                fileSizeCallback = self.fileSizeCallback
+                currentFile = None
+                with self.lock:
+                    currentFile = self.currentFile
+                
+                # Call callback outside lock to prevent blocking
+                if fileSizeCallback and currentFile is not None:
+                    size = self.getFileSize()
+                    if size is not None:
+                        logger.debug(f"Periodic file size update: {currentFile} = {size} bytes")
+                        fileSizeCallback(currentFile, size)
     
     def _checkFile(self):
         """
@@ -179,24 +184,37 @@ class NewFileHandler(FileSystemEventHandler):
         If modified, wait another checkInterval.
         If not modified, proceed with upload.
         """
+        # Get file path outside lock to avoid holding lock during I/O
+        currentFile = None
+        lastModified = None
+        lastCheckTime = None
         with self.lock:
             if self.currentFile is None:
                 logger.debug("No file being tracked, skipping check")
                 return  # No file being tracked
+            currentFile = self.currentFile
+            lastModified = self.lastModified
+            lastCheckTime = self.lastCheckTime
+        
+        # Perform file I/O operations outside the lock (these can be slow)
+        try:
+            filePath = Path(currentFile)
+            if not filePath.exists():
+                logger.warning(f"File no longer exists: {currentFile}")
+                return
             
-            # Get the file's actual modification time from the filesystem
-            try:
-                filePath = Path(self.currentFile)
-                if not filePath.exists():
-                    logger.warning(f"File no longer exists: {self.currentFile}")
+            # Get the file's actual modification time (I/O operation - do outside lock)
+            actualModTime = filePath.stat().st_mtime
+            currentTime = time.time()
+            timeSinceLastMod = currentTime - actualModTime
+            
+            logger.debug(f"Checking file: {currentFile}, actualModTime={actualModTime}, lastCheckTime={lastCheckTime}, lastModified={lastModified}")
+            
+            # Now acquire lock only for state updates
+            with self.lock:
+                # Re-check if file is still being tracked (might have changed)
+                if self.currentFile != currentFile:
                     return
-                
-                # Get the file's actual modification time
-                actualModTime = filePath.stat().st_mtime
-                currentTime = time.time()
-                timeSinceLastMod = currentTime - actualModTime
-                
-                logger.debug(f"Checking file: {self.currentFile}, actualModTime={actualModTime}, lastCheckTime={self.lastCheckTime}, lastModified={self.lastModified}")
                 
                 # Check if file was modified since we last checked
                 # Compare actual file mod time with last known mod time
@@ -204,24 +222,32 @@ class NewFileHandler(FileSystemEventHandler):
                     # File was modified, update mod time and check time, wait another interval
                     self.lastModified = actualModTime
                     self.lastCheckTime = currentTime
-                    logger.info(f"File still being written: {self.currentFile} (modified {timeSinceLastMod:.1f}s ago, will check again in {self.checkInterval}s)")
-                    print(f"File still being written: {self.currentFile}")
+                    logger.info(f"File still being written: {currentFile} (modified {timeSinceLastMod:.1f}s ago, will check again in {self.checkInterval}s)")
+                    print(f"File still being written: {currentFile}")
                     print(f"  Last modified: {timeSinceLastMod:.1f}s ago, will check again in {self.checkInterval} seconds")
                 else:
-                    # File hasn't been modified, it's finished
-                    filePath = self.currentFile
-                    self.currentFile = None
-                    self.lastModified = None
-                    self.lastCheckTime = None
-                    self._status = "finished"
-                    
-                    logger.info(f"File finished writing: {filePath} (no modifications for {timeSinceLastMod:.1f}s)")
-                    print(f"File finished! No modifications for {timeSinceLastMod:.1f}s")
-                    # Process outside the lock
-                    self._onFileFinished(filePath)
-            except Exception as e:
-                logger.error(f"Error checking file {self.currentFile}: {e}", exc_info=True)
-                return
+                    # File hasn't been modified, but check if it's actually been written to
+                    # If file was just created and never modified, it might be empty or not ready
+                    fileSize = self.getFileSize()
+                    if fileSize is not None and fileSize > 0:
+                        # File has content and hasn't been modified - it's finished
+                        finishedFilePath = self.currentFile
+                        self.currentFile = None
+                        self.lastModified = None
+                        self.lastCheckTime = None
+                        self._status = "finished"
+                        
+                        logger.info(f"File finished writing: {finishedFilePath} (no modifications for {timeSinceLastMod:.1f}s, size={fileSize} bytes)")
+                        print(f"File finished! No modifications for {timeSinceLastMod:.1f}s")
+                        # Process outside the lock
+                        self._onFileFinished(finishedFilePath)
+                    else:
+                        # File is empty or doesn't exist - wait another interval
+                        logger.debug(f"File appears empty or doesn't exist, waiting another interval: {currentFile}")
+                        self.lastCheckTime = currentTime
+        except Exception as e:
+            logger.error(f"Error checking file {currentFile}: {e}", exc_info=True)
+            return
     
     def _onFileFinished(self, filePath):
         """
@@ -230,6 +256,27 @@ class NewFileHandler(FileSystemEventHandler):
         """
         logger.info(f"Recording finished: {filePath}")
         print(f"Recording finished: {filePath}")
+        
+        # Verify file exists and has content before attempting upload
+        try:
+            filePathObj = Path(filePath)
+            if not filePathObj.exists():
+                logger.warning(f"File does not exist, skipping upload: {filePath}")
+                print(f"File does not exist: {filePath}")
+                self._setStatus("idle")
+                return
+            
+            fileSize = filePathObj.stat().st_size
+            if fileSize == 0:
+                logger.warning(f"File is empty, skipping upload: {filePath}")
+                print(f"File is empty, skipping upload: {filePath}")
+                self._setStatus("idle")
+                return
+        except Exception as e:
+            logger.error(f"Error checking file before upload: {e}")
+            print(f"Error checking file: {e}")
+            self._setStatus("idle")
+            return
         
         if self.uploader:
             # Notify UI that upload is starting
@@ -240,23 +287,28 @@ class NewFileHandler(FileSystemEventHandler):
             currentDate = datetime.now()
             title = currentDate.strftime("%m/%d/%Y - %I:%M%p").replace("AM", "am").replace("PM", "pm")
             
-            # Upload to YouTube
-            logger.info(f"Starting upload to YouTube: {filePath}")
+            # Upload to YouTube (authentication happens here, not earlier)
+            logger.info(f"Starting upload to YouTube: {filePath} (size: {fileSize} bytes)")
             print(f"Starting upload to YouTube...")
-            videoId = self.uploader.uploadVideo(
-                videoPath=filePath,
-                title=title,
-                description=f"Auto-uploaded recording: {title}",
-                privacyStatus="private"  # Start as private, user can change later
-            )
-            
-            if videoId:
-                logger.info(f"Successfully uploaded video: {videoId}")
-                print(f"Successfully uploaded video: {videoId}")
-                self._setStatus("finished")
-            else:
-                logger.error(f"Failed to upload video: {filePath}")
-                print("Failed to upload video")
+            try:
+                videoId = self.uploader.uploadVideo(
+                    videoPath=filePath,
+                    title=title,
+                    description=f"Auto-uploaded recording: {title}",
+                    privacyStatus="private"  # Start as private, user can change later
+                )
+                
+                if videoId:
+                    logger.info(f"Successfully uploaded video: {videoId}")
+                    print(f"Successfully uploaded video: {videoId}")
+                    self._setStatus("finished")
+                else:
+                    logger.error(f"Upload failed for: {filePath}")
+                    print("Failed to upload video")
+                    self._setStatus("idle")
+            except Exception as e:
+                logger.error(f"Exception during upload: {e}", exc_info=True)
+                print(f"Error during upload: {e}")
                 self._setStatus("idle")
         else:
             logger.warning("No uploader configured, skipping upload")
