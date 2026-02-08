@@ -20,16 +20,18 @@ class Uploader:
     # YouTube API scopes required for uploading videos
     SCOPES = ['https://www.googleapis.com/auth/youtube.upload']
     
-    def __init__(self, tokenFile='token.json'):
+    def __init__(self, tokenFile='token.json', progressCallback=None):
         """
         Initialize the YouTube uploader.
         
         Args:
             tokenFile: Path to store/load OAuth token
+            progressCallback: Callback function(progress) called with upload progress (0-100)
         """
         self.tokenFile = Path(tokenFile)
         self.youtubeService = None
         self.credentials = None
+        self.progressCallback = progressCallback
     
     def _getClientConfig(self):
         """
@@ -208,6 +210,8 @@ class Uploader:
                 elif status:
                     progress = int(status.progress() * 100)
                     print(f"Upload progress: {progress}%")
+                    if self.progressCallback:
+                        self.progressCallback(progress)
                     
             except HttpError as e:
                 if e.resp.status in [500, 502, 503, 504]:
