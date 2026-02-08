@@ -232,4 +232,3 @@ class Uploader:
                 error = None
         
         return None
-

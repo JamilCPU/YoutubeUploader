@@ -319,4 +319,3 @@ class NewFileHandler(FileSystemEventHandler):
                         if size is not None:
                             logger.debug(f"File size update from modification event: {filePath} = {size} bytes")
                             self.fileSizeCallback(filePath, size)
-
