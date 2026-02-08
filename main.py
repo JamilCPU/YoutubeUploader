@@ -95,8 +95,12 @@ class YouTubeUploader:
             fileSizeCallback: Optional callback for file size updates
             progressCallback: Optional callback for upload progress
         """
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"Starting directory watch mode: {directory} (checkInterval={self.checkInterval}s)")
         self.watchDirectory = Path(directory)
         self.start(statusCallback, fileSizeCallback, progressCallback)
+        logger.info(f"Directory watch initialized: {directory}")
     
     def startWatchingFile(self, filePath, statusCallback=None, fileSizeCallback=None, progressCallback=None):
         """
@@ -108,6 +112,10 @@ class YouTubeUploader:
             fileSizeCallback: Optional callback for file size updates
             progressCallback: Optional callback for upload progress
         """
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"Starting file watch mode for: {filePath} (checkInterval={self.checkInterval}s)")
+        
         # Set up uploader with progress callback
         if progressCallback:
             self.uploader.progressCallback = progressCallback
@@ -122,6 +130,7 @@ class YouTubeUploader:
         
         # Manually set the file to track
         self.eventHandler.setFileToTrack(filePath)
+        logger.info(f"File watch initialized: {filePath}")
     
     def getStatus(self):
         """
@@ -162,12 +171,23 @@ def main():
     """
     Main entry point for the application.
     """
+    import logging
     import sys
+    
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
     
     # Check if GUI mode is requested
     if len(sys.argv) > 1 and sys.argv[1] == '--gui':
         from PySide6.QtWidgets import QApplication
         from gui import YouTubeUploaderGUI
+        
+        logger = logging.getLogger(__name__)
+        logger.info("Starting YouTube Uploader in GUI mode")
         
         # Create QApplication first (required before any widgets)
         app = QApplication(sys.argv)
@@ -175,6 +195,8 @@ def main():
         window.run()
         sys.exit(app.exec())
     else:
+        logger = logging.getLogger(__name__)
+        logger.info("Starting YouTube Uploader in CLI mode")
         # Create and start the uploader in CLI mode
         uploader = YouTubeUploader()
         uploader.start()
