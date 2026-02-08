@@ -78,23 +78,45 @@ class Uploader:
         if not self.credentials or not self.credentials.valid:
             if self.credentials and self.credentials.expired and self.credentials.refresh_token:
                 # Refresh expired token
-                self.credentials.refresh(Request())
+                try:
+                    self.credentials.refresh(Request())
+                except Exception as e:
+                    print(f"Error refreshing token: {e}")
+                    print("Token refresh failed. You may need to re-authenticate.")
+                    # Delete invalid token file and try to get new credentials
+                    if self.tokenFile.exists():
+                        self.tokenFile.unlink()
+                        print("Deleted invalid token file. Will attempt to get new credentials.")
+                    self.credentials = None
             else:
                 # Need to get new credentials from environment variables
                 clientConfig = self._getClientConfig()
                 if not clientConfig:
                     print("Error: Environment variables not set")
-                    print("Please set YOUTUBE_CLIENT_ID and YOUTUBE_CLIENT_SECRET")
+                    print("Please set YOUTUBE_CLIENT_ID, YOUTUBE_CLIENT_SECRET, and YOUTUBE_PROJECT_ID")
                     print("Example:")
                     print("  export YOUTUBE_CLIENT_ID='your-client-id'")
                     print("  export YOUTUBE_CLIENT_SECRET='your-client-secret'")
+                    print("  export YOUTUBE_PROJECT_ID='your-project-id'")
                     return False
                 
-                flow = InstalledAppFlow.from_client_config(
-                    clientConfig, 
-                    self.SCOPES
-                )
-                self.credentials = flow.run_local_server(port=0)
+                try:
+                    flow = InstalledAppFlow.from_client_config(
+                        clientConfig, 
+                        self.SCOPES
+                    )
+                    self.credentials = flow.run_local_server(port=0)
+                except Exception as e:
+                    errorMsg = str(e)
+                    print(f"Error during OAuth authentication: {errorMsg}")
+                    if "GOCSPX" in errorMsg or "invalid_grant" in errorMsg.lower():
+                        print("\nOAuth authentication failed. This usually means:")
+                        print("1. The OAuth credentials (CLIENT_ID, CLIENT_SECRET, PROJECT_ID) are incorrect")
+                        print("2. The OAuth consent screen is not properly configured")
+                        print("3. You need to delete token.json and re-authenticate")
+                        if self.tokenFile.exists():
+                            print(f"\nTry deleting {self.tokenFile} and running again.")
+                    return False
             
             # Save credentials for next run
             with open(self.tokenFile, 'w') as token:
@@ -106,7 +128,14 @@ class Uploader:
             print("Successfully authenticated with YouTube API")
             return True
         except Exception as e:
-            print(f"Error building YouTube service: {e}")
+            errorMsg = str(e)
+            print(f"Error building YouTube service: {errorMsg}")
+            if "GOCSPX" in errorMsg or "invalid_grant" in errorMsg.lower():
+                print("\nAuthentication error detected. This usually means:")
+                print("1. The OAuth credentials are invalid or expired")
+                print("2. The PROJECT_ID doesn't match your Google Cloud project")
+                print("3. The OAuth consent screen needs to be reconfigured")
+                print(f"\nTry deleting {self.tokenFile} and re-authenticating.")
             return False
     
     def uploadVideo(self, videoPath, title, description="", categoryId="22", privacyStatus="unlisted", tags=None):
@@ -177,10 +206,26 @@ class Uploader:
                 return None
                 
         except HttpError as e:
+            errorMsg = str(e)
             print(f"An HTTP error occurred: {e}")
+            if "GOCSPX" in errorMsg or "invalid_grant" in errorMsg.lower() or "unauthorized" in errorMsg.lower():
+                print("\nAuthentication error during upload. The token may be invalid.")
+                print(f"Try deleting {self.tokenFile} and re-authenticating.")
+                # Clear invalid credentials
+                self.credentials = None
+                self.youtubeService = None
             return None
         except Exception as e:
+            errorMsg = str(e)
             print(f"An error occurred during upload: {e}")
+            if "GOCSPX" in errorMsg:
+                print("\nOAuth error detected. This usually means:")
+                print("1. Invalid or expired OAuth credentials")
+                print("2. PROJECT_ID mismatch with Google Cloud Console")
+                print(f"3. Try deleting {self.tokenFile} and re-authenticating")
+                # Clear invalid credentials
+                self.credentials = None
+                self.youtubeService = None
             return None
     
     def _resumableUpload(self, insertRequest):
