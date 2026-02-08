@@ -58,6 +58,76 @@ class Uploader:
             }
         }
     
+    def testCredentials(self):
+        """
+        Test if environment variables are set and API connection works.
+        This performs a simple API call to verify authentication without uploading.
+        
+        Returns:
+            Tuple of (success: bool, message: str)
+        """
+        # Check environment variables first
+        clientId = os.getenv('YOUTUBE_CLIENT_ID')
+        clientSecret = os.getenv('YOUTUBE_CLIENT_SECRET')
+        clientProjectId = os.getenv('YOUTUBE_PROJECT_ID')
+        
+        if not clientId or not clientSecret or not clientProjectId:
+            missing = []
+            details = []
+            
+            if not clientId:
+                missing.append("YOUTUBE_CLIENT_ID")
+                details.append("YOUTUBE_CLIENT_ID: (not set)")
+            else:
+                # Show partial value for security (first 8 chars + ...)
+                maskedId = clientId[:8] + "..." if len(clientId) > 8 else clientId
+                details.append(f"YOUTUBE_CLIENT_ID: {maskedId} (set)")
+            
+            if not clientSecret:
+                missing.append("YOUTUBE_CLIENT_SECRET")
+                details.append("YOUTUBE_CLIENT_SECRET: (not set)")
+            else:
+                # Show partial value for security (first 8 chars + ...)
+                maskedSecret = clientSecret[:8] + "..." if len(clientSecret) > 8 else clientSecret
+                details.append(f"YOUTUBE_CLIENT_SECRET: {maskedSecret} (set)")
+            
+            if not clientProjectId:
+                missing.append("YOUTUBE_PROJECT_ID")
+                details.append("YOUTUBE_PROJECT_ID: (not set)")
+            else:
+                details.append(f"YOUTUBE_PROJECT_ID: {clientProjectId} (set)")
+            
+            message = f"Missing environment variables: {', '.join(missing)}\n\nCurrent values:\n" + "\n".join(details)
+            return (False, message)
+        
+        # Try to authenticate
+        if not self.authenticate():
+            return (False, "Authentication failed. Check your credentials and OAuth configuration.")
+        
+        # Test API connection with a simple call (get channel info)
+        try:
+            # Use channels().list() with 'mine' to get current user's channel info
+            # This is a simple read operation that doesn't require uploading
+            request = self.youtubeService.channels().list(
+                part='snippet',
+                mine=True
+            )
+            response = request.execute()
+            
+            if response.get('items'):
+                channelTitle = response['items'][0]['snippet']['title']
+                return (True, f"Credentials valid! Connected to YouTube channel: {channelTitle}")
+            else:
+                return (True, "Credentials valid! API connection successful. (No channel info available)")
+                
+        except HttpError as e:
+            errorMsg = str(e)
+            if "GOCSPX" in errorMsg:
+                return (False, f"OAuth error: {errorMsg}\n\nThis usually means:\n1. Invalid CLIENT_ID, CLIENT_SECRET, or PROJECT_ID\n2. OAuth consent screen not configured\n3. Token needs to be refreshed")
+            return (False, f"API error: {errorMsg}")
+        except Exception as e:
+            return (False, f"Error testing API connection: {str(e)}")
+    
     def authenticate(self):
         """
         Authenticate with YouTube API using OAuth 2.0.

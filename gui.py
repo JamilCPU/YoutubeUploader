@@ -133,9 +133,11 @@ class YouTubeUploaderGUI(QMainWindow):
         self.startBtn = QPushButton("Start")
         self.stopBtn = QPushButton("Stop")
         self.checkNowBtn = QPushButton("Check Now")
+        self.testCredentialsBtn = QPushButton("Test Credentials")
         self.startBtn.clicked.connect(self.startWatching)
         self.stopBtn.clicked.connect(self.stopWatching)
         self.checkNowBtn.clicked.connect(self.checkFileNow)
+        self.testCredentialsBtn.clicked.connect(self.testCredentials)
         self.stopBtn.setEnabled(False)
         self.checkNowBtn.setEnabled(False)
         
@@ -143,6 +145,12 @@ class YouTubeUploaderGUI(QMainWindow):
         controlLayout.addWidget(self.stopBtn)
         controlLayout.addWidget(self.checkNowBtn)
         layout.addLayout(controlLayout)
+        
+        # Test credentials button (separate row)
+        testLayout = QHBoxLayout()
+        testLayout.addWidget(self.testCredentialsBtn)
+        testLayout.addStretch()
+        layout.addLayout(testLayout)
         
         # Add stretch to push everything to top
         layout.addStretch()
@@ -243,6 +251,38 @@ class YouTubeUploaderGUI(QMainWindow):
         except Exception as e:
             logger.error(f"Error during manual file check: {e}", exc_info=True)
             QMessageBox.critical(self, "Check Error", f"Error checking file: {str(e)}")
+    
+    def testCredentials(self):
+        """Test YouTube API credentials and connection."""
+        logger.info("Testing YouTube API credentials")
+        
+        # Disable button during test to prevent multiple clicks
+        self.testCredentialsBtn.setEnabled(False)
+        self.testCredentialsBtn.setText("Testing...")
+        
+        try:
+            # Create a temporary uploader instance for testing (don't use the main one)
+            from uploader import Uploader
+            testUploader = Uploader()
+            
+            # Test credentials
+            success, message = testUploader.testCredentials()
+            
+            if success:
+                QMessageBox.information(self, "Credentials Valid", message)
+                logger.info(f"Credentials test successful: {message}")
+            else:
+                QMessageBox.warning(self, "Credentials Invalid", message)
+                logger.warning(f"Credentials test failed: {message}")
+                
+        except Exception as e:
+            errorMsg = f"Error testing credentials: {str(e)}"
+            logger.error(errorMsg, exc_info=True)
+            QMessageBox.critical(self, "Test Error", errorMsg)
+        finally:
+            # Re-enable button
+            self.testCredentialsBtn.setEnabled(True)
+            self.testCredentialsBtn.setText("Test Credentials")
     
     def stopWatching(self):
         """Stop watching and clean up."""
