@@ -62,6 +62,7 @@ class Uploader:
         """
         Test if environment variables are set and API connection works.
         This performs a simple API call to verify authentication without uploading.
+        Uses youtube.readonly scope for testing (separate from upload scope).
         
         Returns:
             Tuple of (success: bool, message: str)
@@ -100,15 +101,55 @@ class Uploader:
             message = f"Missing environment variables: {', '.join(missing)}\n\nCurrent values:\n" + "\n".join(details)
             return (False, message)
         
-        # Try to authenticate
-        if not self.authenticate():
-            return (False, "Authentication failed. Check your credentials and OAuth configuration.")
+        # Create credentials and API service client with readonly scope for testing
+        # This uses the Google API library to authenticate and make API calls
+        # We use a separate scope (youtube.readonly) so testing doesn't affect the main uploader
+        testScopes = ['https://www.googleapis.com/auth/youtube.readonly']
+        testTokenFile = Path('token.readonly.json')  # Separate token file for readonly scope
         
-        # Test API connection with a simple call (get channel info)
         try:
-            # Use channels().list() with 'mine' to get current user's channel info
-            # This is a simple read operation that doesn't require uploading
-            request = self.youtubeService.channels().list(
+            # Get client config from environment variables
+            clientConfig = self._getClientConfig()
+            if not clientConfig:
+                return (False, "Failed to get client configuration from environment variables.")
+            
+            # Try to load existing readonly token
+            testCredentials = None
+            if testTokenFile.exists():
+                try:
+                    testCredentials = Credentials.from_authorized_user_file(
+                        str(testTokenFile),
+                        testScopes
+                    )
+                except Exception:
+                    # If token is invalid, delete it
+                    testTokenFile.unlink()
+                    testCredentials = None
+            
+            # Authenticate if needed (using Google's OAuth library)
+            if not testCredentials or not testCredentials.valid:
+                if testCredentials and testCredentials.expired and testCredentials.refresh_token:
+                    try:
+                        testCredentials.refresh(Request())
+                    except Exception:
+                        testTokenFile.unlink() if testTokenFile.exists() else None
+                        testCredentials = None
+                
+                if not testCredentials or not testCredentials.valid:
+                    # Get new credentials with readonly scope (opens browser for OAuth)
+                    flow = InstalledAppFlow.from_client_config(clientConfig, testScopes)
+                    testCredentials = flow.run_local_server(port=0)
+                    
+                    # Save readonly token
+                    with open(testTokenFile, 'w') as token:
+                        token.write(testCredentials.to_json())
+            
+            # Build YouTube API service client using Google's library
+            # This creates a client object that can make API calls
+            testService = build('youtube', 'v3', credentials=testCredentials)
+            
+            # Test API connection with channels().list() using readonly scope
+            request = testService.channels().list(
                 part='snippet',
                 mine=True
             )
@@ -118,13 +159,16 @@ class Uploader:
                 channelTitle = response['items'][0]['snippet']['title']
                 return (True, f"Credentials valid! Connected to YouTube channel: {channelTitle}")
             else:
-                return (True, "Credentials valid! API connection successful. (No channel info available)")
+                return (True, "Credentials valid! API connection successful using youtube.readonly scope.")
                 
         except HttpError as e:
             errorMsg = str(e)
+            statusCode = e.resp.status if hasattr(e, 'resp') else None
             if "GOCSPX" in errorMsg:
                 return (False, f"OAuth error: {errorMsg}\n\nThis usually means:\n1. Invalid CLIENT_ID, CLIENT_SECRET, or PROJECT_ID\n2. OAuth consent screen not configured\n3. Token needs to be refreshed")
-            return (False, f"API error: {errorMsg}")
+            elif statusCode == 403:
+                return (False, f"Permission denied (403): {errorMsg}\n\nMake sure 'youtube.readonly' scope is added to your OAuth consent screen in Google Cloud Console.")
+            return (False, f"API error ({statusCode}): {errorMsg}")
         except Exception as e:
             return (False, f"Error testing API connection: {str(e)}")
     
