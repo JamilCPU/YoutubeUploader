@@ -3,6 +3,7 @@ YouTube video uploader using the YouTube Data API v3.
 Handles authentication and video uploads to YouTube.
 """
 import os
+import logging
 from pathlib import Path
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -10,6 +11,9 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from googleapiclient.errors import HttpError
+
+# Create logger at module level
+logger = logging.getLogger(__name__)
 
 
 class Uploader:
@@ -32,6 +36,7 @@ class Uploader:
         self.youtubeService = None
         self.credentials = None
         self.progressCallback = progressCallback
+        self.uploadAcceptedCallback = None  # Callback when YouTube accepts upload
     
     def _getClientConfig(self):
         """
@@ -300,6 +305,12 @@ class Uploader:
         try:
             print(f"Uploading video: {videoPath.name}")
             print(f"Title: {title}")
+            logger.info(f"Preparing upload: {videoPath.name}")
+            logger.info(f"Title: {title}")
+            logger.info(f"Description: {description}")
+            logger.info(f"Privacy: {privacyStatus}")
+            logger.info(f"Category: {categoryId}")
+            logger.info(f"File size: {videoPath.stat().st_size} bytes")
             
             # Insert video
             insertRequest = self.youtubeService.videos().insert(
@@ -307,6 +318,11 @@ class Uploader:
                 body=body,
                 media_body=media
             )
+            
+            logger.info("YouTube API insert request created successfully")
+            logger.info(f"Request parts: {','.join(body.keys())}")
+            logger.info(f"Media file: {videoPath}")
+            logger.info("Starting resumable upload to YouTube...")
             
             # Execute upload with progress
             videoId = self._resumableUpload(insertRequest)
@@ -355,20 +371,41 @@ class Uploader:
         response = None
         error = None
         retry = 0
+        uploadAccepted = False
         
         while response is None:
             try:
                 print("Uploading file...")
                 status, response = insertRequest.next_chunk()
                 
+                # Log when YouTube first accepts the upload (first chunk)
+                if not uploadAccepted and status:
+                    uploadAccepted = True
+                    logger.info("YouTube accepted upload request - upload session established")
+                    logger.info(f"Resumable upload URL received from YouTube")
+                    logger.info(f"Upload session active, transferring file chunks...")
+                    # Notify that upload was accepted
+                    if self.uploadAcceptedCallback:
+                        try:
+                            self.uploadAcceptedCallback()
+                        except Exception as e:
+                            logger.warning(f"Error in uploadAcceptedCallback: {e}")
+                
                 if response is not None:
                     if 'id' in response:
-                        return response['id']
+                        videoId = response['id']
+                        logger.info(f"YouTube API response received - Upload complete")
+                        logger.info(f"Video ID: {videoId}")
+                        logger.info(f"Video URL: https://www.youtube.com/watch?v={videoId}")
+                        logger.info(f"Full API response: {response}")
+                        return videoId
                     else:
+                        logger.error(f"Upload failed - unexpected response: {response}")
                         raise Exception(f"Upload failed with response: {response}")
                 elif status:
                     progress = int(status.progress() * 100)
                     print(f"Upload progress: {progress}%")
+                    logger.debug(f"Upload progress: {progress}%")
                     if self.progressCallback:
                         self.progressCallback(progress)
                     

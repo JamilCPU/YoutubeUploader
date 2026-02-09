@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QPushButton, QLabel, QRadioButton, QButtonGroup, QGroupBox,
     QFileDialog, QProgressDialog, QMessageBox, QTextEdit
 )
-from PySide6.QtCore import QTimer, Qt, Signal, QObject
+from PySide6.QtCore import QTimer, Qt, Signal, QObject, QThread
 from PySide6.QtGui import QFont
 
 from main import YouTubeUploader
@@ -28,6 +28,76 @@ class StatusSignals(QObject):
     uploadProgress = Signal(int)
 
 
+class UploadThread(QThread):
+    """Thread for uploading videos in the background."""
+    uploadProgress = Signal(int)
+    uploadAccepted = Signal(str, str, str)  # filePath, title, uploadUrl (when YouTube accepts)
+    uploadComplete = Signal(str, str)  # videoId, filePath
+    uploadError = Signal(str, str)  # error message, filePath
+    
+    def __init__(self, filePath, uploader):
+        """
+        Initialize upload thread.
+        
+        Args:
+            filePath: Path to file to upload
+            uploader: Uploader instance to use
+        """
+        super().__init__()
+        self.filePath = filePath
+        self.uploader = uploader
+        
+        # Set up progress callback
+        self.uploader.progressCallback = self._progressCallback
+        # Set up upload accepted callback
+        self.uploader.uploadAcceptedCallback = self._uploadAcceptedCallback
+    
+    def _progressCallback(self, progress):
+        """Thread-safe progress callback."""
+        self.uploadProgress.emit(progress)
+    
+    def _uploadAcceptedCallback(self):
+        """Thread-safe callback when YouTube accepts upload."""
+        from pathlib import Path
+        from datetime import datetime
+        currentDate = datetime.now()
+        title = currentDate.strftime("%m/%d/%Y - %I:%M%p").replace("AM", "am").replace("PM", "pm")
+        # Emit signal with file path, title, and a placeholder for upload URL
+        self.uploadAccepted.emit(str(self.filePath), title, "YouTube upload session established")
+    
+    def run(self):
+        """Execute upload in background thread."""
+        try:
+            from datetime import datetime
+            # Generate title from current date and time
+            currentDate = datetime.now()
+            title = currentDate.strftime("%m/%d/%Y - %I:%M%p").replace("AM", "am").replace("PM", "pm")
+            
+            logger.info(f"Starting direct upload: {self.filePath}")
+            logger.info(f"Upload title: {title}")
+            
+            # Call uploadVideo and capture detailed logging
+            videoId = self.uploader.uploadVideo(
+                videoPath=self.filePath,
+                title=title,
+                description=f"Direct upload: {title}",
+                privacyStatus="private"
+            )
+            
+            if videoId:
+                logger.info(f"Direct upload successful: {self.filePath} -> Video ID: {videoId}")
+                logger.info(f"Video URL: https://www.youtube.com/watch?v={videoId}")
+                self.uploadComplete.emit(videoId, str(self.filePath))
+            else:
+                errorMsg = "Upload failed - no video ID returned"
+                logger.error(f"Direct upload failed: {self.filePath}")
+                self.uploadError.emit(errorMsg, str(self.filePath))
+        except Exception as e:
+            errorMsg = f"Upload error: {str(e)}"
+            logger.error(f"Direct upload exception: {self.filePath} - {e}", exc_info=True)
+            self.uploadError.emit(errorMsg, str(self.filePath))
+
+
 class YouTubeUploaderGUI(QMainWindow):
     """
     Main GUI window for YouTube Uploader.
@@ -42,6 +112,10 @@ class YouTubeUploaderGUI(QMainWindow):
         self.currentFileSize = 0
         self.currentStatus = "idle"
         self.uploadDialog = None
+        
+        # Upload tracking for direct uploads
+        self.uploadThread = None
+        self.uploadingFiles = set()  # Track files currently being uploaded
         
         # Create signals object for thread-safe communication
         self.signals = StatusSignals()
@@ -100,12 +174,15 @@ class YouTubeUploaderGUI(QMainWindow):
         
         # Selection buttons
         buttonLayout = QHBoxLayout()
-        self.selectDirectoryBtn = QPushButton("Select Directory")
-        self.selectFileBtn = QPushButton("Select File")
+        self.selectDirectoryBtn = QPushButton("Watch Directory")
+        self.selectFileBtn = QPushButton("Watch File")
+        self.uploadFileBtn = QPushButton("Upload File")
         self.selectDirectoryBtn.clicked.connect(self.selectDirectory)
         self.selectFileBtn.clicked.connect(self.selectFile)
+        self.uploadFileBtn.clicked.connect(self.uploadFile)
         buttonLayout.addWidget(self.selectDirectoryBtn)
         buttonLayout.addWidget(self.selectFileBtn)
+        buttonLayout.addWidget(self.uploadFileBtn)
         layout.addLayout(buttonLayout)
         
         # Selected path display
@@ -121,10 +198,12 @@ class YouTubeUploaderGUI(QMainWindow):
         self.fileLabel = QLabel("File: None")
         self.sizeLabel = QLabel("Size: N/A")
         self.statusLabel = QLabel("Status: Idle")
+        self.progressLabel = QLabel("")  # For upload progress
         
         statusLayout.addWidget(self.fileLabel)
         statusLayout.addWidget(self.sizeLabel)
         statusLayout.addWidget(self.statusLabel)
+        statusLayout.addWidget(self.progressLabel)
         statusGroup.setLayout(statusLayout)
         layout.addWidget(statusGroup)
         
@@ -331,16 +410,14 @@ class YouTubeUploaderGUI(QMainWindow):
         self.currentStatus = status
         
         if status == "uploading":
-            # Show upload dialog
+            # Update status display for upload
             if self.currentFile:
-                self.showUploadDialog(Path(self.currentFile).name)
+                self.progressLabel.setText("Preparing upload...")
         elif status == "finished":
-            # Close upload dialog if open
-            if self.uploadDialog:
-                self.uploadDialog.close()
-                self.uploadDialog = None
-                QMessageBox.information(self, "Upload Complete", "Video uploaded successfully!")
-            self.currentStatus = "idle"
+            # Update status display after upload completes
+            self.progressLabel.setText("Upload complete!")
+            # Reset after a moment
+            QTimer.singleShot(5000, self._resetUploadStatus)
         
         self.updateStatusDisplay()
     
@@ -352,8 +429,8 @@ class YouTubeUploaderGUI(QMainWindow):
     
     def _onUploadProgress(self, progress):
         """Handle upload progress in UI thread."""
-        if self.uploadDialog:
-            self.uploadDialog.setValue(progress)
+        self.progressLabel.setText(f"Uploading: {progress}%")
+        self.updateStatusDisplay()
     
     def updateFileSize(self):
         """Manually update file size (called by timer)."""
@@ -381,6 +458,16 @@ class YouTubeUploaderGUI(QMainWindow):
         # Update status label
         statusText = self.currentStatus.capitalize()
         self.statusLabel.setText(f"Status: {statusText}")
+        
+        # Show/hide progress label based on status
+        if self.currentStatus == "uploading":
+            self.progressLabel.setVisible(True)
+        elif self.currentStatus == "finished":
+            self.progressLabel.setVisible(True)
+        else:
+            # Hide progress label when not uploading
+            if not self.progressLabel.text():
+                self.progressLabel.setVisible(False)
     
     def formatFileSize(self, sizeBytes):
         """Format file size in human-readable format."""
@@ -410,6 +497,131 @@ class YouTubeUploaderGUI(QMainWindow):
         self.uploadDialog.setAutoClose(False)
         self.uploadDialog.setAutoReset(False)
         self.uploadDialog.show()
+    
+    def uploadFile(self):
+        """Select a file and upload it directly to YouTube."""
+        logger.info("Opening file selection dialog for direct upload")
+        filePath, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select File to Upload",
+            str(Path.home()),
+            "Video Files (*.mp4 *.avi *.mov *.mkv *.webm);;All Files (*)"
+        )
+        
+        if not filePath:
+            logger.debug("File selection cancelled for direct upload")
+            return
+        
+        filePath = Path(filePath)
+        normalizedPath = str(filePath.resolve())
+        
+        # Check if file is already being uploaded
+        if normalizedPath in self.uploadingFiles:
+            logger.warning(f"Attempted to upload file that is already uploading: {normalizedPath}")
+            QMessageBox.warning(
+                self,
+                "Already Uploading",
+                f"This file is already being uploaded:\n{filePath.name}\n\nPlease wait for the current upload to complete."
+            )
+            return
+        
+        # Verify file exists and has content
+        if not filePath.exists():
+            QMessageBox.warning(self, "File Not Found", f"File does not exist: {filePath}")
+            return
+        
+        try:
+            fileSize = filePath.stat().st_size
+            if fileSize == 0:
+                QMessageBox.warning(self, "Empty File", f"File is empty: {filePath.name}")
+                return
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Error checking file: {str(e)}")
+            return
+        
+        # Add to uploading set
+        self.uploadingFiles.add(normalizedPath)
+        logger.info(f"Starting direct upload: {normalizedPath}")
+        
+        # Create a new Uploader instance for this upload (to avoid conflicts)
+        from uploader import Uploader
+        uploader = Uploader()
+        
+        # Create upload thread
+        self.uploadThread = UploadThread(normalizedPath, uploader)
+        self.uploadThread.uploadProgress.connect(self._onDirectUploadProgress)
+        self.uploadThread.uploadAccepted.connect(self._onDirectUploadAccepted)
+        self.uploadThread.uploadComplete.connect(self._onDirectUploadComplete)
+        self.uploadThread.uploadError.connect(self._onDirectUploadError)
+        
+        # Update status display to show upload starting
+        self.currentFile = str(filePath)
+        self.currentFileSize = filePath.stat().st_size
+        self.currentStatus = "uploading"
+        self.updateStatusDisplay()
+        self.progressLabel.setText("Preparing upload...")
+        
+        # Start upload in background thread
+        self.uploadThread.start()
+    
+    def _onDirectUploadAccepted(self, filePath, title, uploadUrl):
+        """Handle when YouTube accepts the upload request."""
+        logger.info(f"YouTube accepted upload request for: {filePath}")
+        self.progressLabel.setText("Upload accepted by YouTube - transferring...")
+        self.updateStatusDisplay()
+    
+    def _onDirectUploadProgress(self, progress):
+        """Handle direct upload progress updates."""
+        self.progressLabel.setText(f"Uploading: {progress}%")
+        self.updateStatusDisplay()
+    
+    def _onDirectUploadComplete(self, videoId, filePath):
+        """Handle direct upload completion."""
+        normalizedPath = str(Path(filePath).resolve())
+        self.uploadingFiles.discard(normalizedPath)
+        
+        logger.info(f"Direct upload completed: {filePath} -> {videoId}")
+        
+        # Update status display
+        self.currentStatus = "finished"
+        self.progressLabel.setText(f"Complete! Video ID: {videoId}")
+        self.updateStatusDisplay()
+        
+        # Clean up thread
+        if self.uploadThread:
+            self.uploadThread.wait()
+            self.uploadThread = None
+        
+        # Reset status after a moment
+        QTimer.singleShot(5000, self._resetUploadStatus)  # Reset after 5 seconds
+    
+    def _resetUploadStatus(self):
+        """Reset upload status display after completion."""
+        self.currentFile = None
+        self.currentFileSize = 0
+        self.currentStatus = "idle"
+        self.progressLabel.setText("")
+        self.updateStatusDisplay()
+    
+    def _onDirectUploadError(self, errorMsg, filePath):
+        """Handle direct upload errors."""
+        normalizedPath = str(Path(filePath).resolve())
+        self.uploadingFiles.discard(normalizedPath)
+        
+        logger.error(f"Direct upload failed: {filePath} - {errorMsg}")
+        
+        # Update status display
+        self.currentStatus = "idle"
+        self.progressLabel.setText(f"Error: {errorMsg[:50]}...")
+        self.updateStatusDisplay()
+        
+        # Clean up thread
+        if self.uploadThread:
+            self.uploadThread.wait()
+            self.uploadThread = None
+        
+        # Reset status after a moment
+        QTimer.singleShot(5000, self._resetUploadStatus)
     
     def run(self):
         """Run the GUI application."""
