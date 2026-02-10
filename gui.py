@@ -111,6 +111,7 @@ class YouTubeUploaderGUI(QMainWindow):
         self.currentFile = None
         self.currentFileSize = 0
         self.currentStatus = "idle"
+        self.currentProgress = 0  # Track upload progress percentage
         self.uploadDialog = None
         
         # Upload tracking for direct uploads
@@ -410,6 +411,8 @@ class YouTubeUploaderGUI(QMainWindow):
         self.currentStatus = status
         
         if status == "uploading":
+            # Reset progress when starting upload
+            self.currentProgress = 0
             # Update status display for upload
             if self.currentFile:
                 self.progressLabel.setText("Preparing upload...")
@@ -429,6 +432,7 @@ class YouTubeUploaderGUI(QMainWindow):
     
     def _onUploadProgress(self, progress):
         """Handle upload progress in UI thread."""
+        self.currentProgress = progress
         self.progressLabel.setText(f"Uploading: {progress}%")
         self.updateStatusDisplay()
     
@@ -455,9 +459,12 @@ class YouTubeUploaderGUI(QMainWindow):
             self.fileLabel.setText("File: None")
             self.sizeLabel.setText("Size: N/A")
         
-        # Update status label
+        # Update status label with progress if uploading
         statusText = self.currentStatus.capitalize()
-        self.statusLabel.setText(f"Status: {statusText}")
+        if self.currentStatus == "uploading" and self.currentProgress > 0:
+            self.statusLabel.setText(f"Status: {statusText} ({self.currentProgress}%)")
+        else:
+            self.statusLabel.setText(f"Status: {statusText}")
         
         # Show/hide progress label based on status
         if self.currentStatus == "uploading":
@@ -558,6 +565,7 @@ class YouTubeUploaderGUI(QMainWindow):
         self.currentFile = str(filePath)
         self.currentFileSize = filePath.stat().st_size
         self.currentStatus = "uploading"
+        self.currentProgress = 0  # Reset progress when starting upload
         self.updateStatusDisplay()
         self.progressLabel.setText("Preparing upload...")
         
@@ -572,6 +580,7 @@ class YouTubeUploaderGUI(QMainWindow):
     
     def _onDirectUploadProgress(self, progress):
         """Handle direct upload progress updates."""
+        self.currentProgress = progress
         self.progressLabel.setText(f"Uploading: {progress}%")
         self.updateStatusDisplay()
     
