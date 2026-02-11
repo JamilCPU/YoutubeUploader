@@ -9,10 +9,10 @@ from pathlib import Path
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QRadioButton, QButtonGroup, QGroupBox,
-    QFileDialog, QProgressDialog, QMessageBox, QTextEdit
+    QFileDialog, QProgressDialog, QMessageBox, QTextEdit, QSystemTrayIcon, QMenu
 )
 from PySide6.QtCore import QTimer, Qt, Signal, QObject, QThread
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QIcon, QScreen, QCloseEvent
 
 from main import YouTubeUploader
 from fileHandler import NewFileHandler
@@ -118,6 +118,12 @@ class YouTubeUploaderGUI(QMainWindow):
         self.uploadThread = None
         self.uploadingFiles = set()  # Track files currently being uploaded
         
+        # System tray
+        self.trayIcon = None
+        self.showAction = None
+        self.hideAction = None
+        self.quitAction = None
+        
         # Create signals object for thread-safe communication
         self.signals = StatusSignals()
         self.signals.statusChanged.connect(self._onStatusChanged)
@@ -130,6 +136,9 @@ class YouTubeUploaderGUI(QMainWindow):
         # Set up UI
         self.initUI()
         
+        # Create system tray icon
+        self._createTrayIcon()
+        
         # Set up timer for file size updates (every 5 minutes = 300000 ms)
         self.sizeUpdateTimer = QTimer()
         self.sizeUpdateTimer.timeout.connect(self.updateFileSize)
@@ -140,6 +149,9 @@ class YouTubeUploaderGUI(QMainWindow):
         self.setWindowTitle("YouTube Uploader")
         self.setMinimumWidth(500)
         self.setMinimumHeight(400)
+        
+        # Position window at bottom-right (but don't show yet)
+        self._positionWindowBottomRight()
         
         # Central widget
         centralWidget = QWidget()
@@ -234,6 +246,124 @@ class YouTubeUploaderGUI(QMainWindow):
         
         # Add stretch to push everything to top
         layout.addStretch()
+    
+    def _createTrayIcon(self):
+        """Create and configure the system tray icon and menu."""
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            logger.warning("System tray is not available on this system")
+            return
+        
+        # Create system tray icon
+        self.trayIcon = QSystemTrayIcon(self)
+        
+        # Set icon - try to use a theme icon, fallback to a simple icon
+        icon = QIcon.fromTheme("video-x-generic")
+        if icon.isNull():
+            # Fallback: create a simple icon or use application icon
+            icon = self.style().standardIcon(self.style().StandardPixmap.SP_MediaPlay)
+            if icon.isNull():
+                # Last resort: use a default icon
+                icon = QIcon()
+        
+        self.trayIcon.setIcon(icon)
+        self.trayIcon.setToolTip("YouTube Uploader")
+        
+        # Create context menu
+        trayMenu = QMenu()
+        
+        # Show/Hide action (will be toggled)
+        self.showAction = trayMenu.addAction("Show Window")
+        self.showAction.triggered.connect(self.showWindow)
+        
+        self.hideAction = trayMenu.addAction("Hide Window")
+        self.hideAction.triggered.connect(self.hideWindow)
+        self.hideAction.setVisible(False)  # Initially hidden since window starts hidden
+        
+        trayMenu.addSeparator()
+        
+        # Quit action
+        self.quitAction = trayMenu.addAction("Quit")
+        self.quitAction.triggered.connect(QApplication.instance().quit)
+        
+        self.trayIcon.setContextMenu(trayMenu)
+        
+        # Handle tray icon activation (double-click)
+        self.trayIcon.activated.connect(self._onTrayIconActivated)
+        
+        # Show the tray icon
+        self.trayIcon.show()
+        logger.info("System tray icon created and shown")
+    
+    def _onTrayIconActivated(self, reason):
+        """Handle tray icon activation (left-click to show window, double-click to toggle)."""
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            # Left-click: show window if hidden
+            if not self.isVisible():
+                self.showWindow()
+        elif reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            # Double-click: toggle window visibility
+            if self.isVisible():
+                self.hideWindow()
+            else:
+                self.showWindow()
+    
+    def _updateTrayMenu(self):
+        """Update tray menu text based on window visibility."""
+        if self.trayIcon is None:
+            return
+        
+        isVisible = self.isVisible()
+        if self.showAction:
+            self.showAction.setVisible(not isVisible)
+        if self.hideAction:
+            self.hideAction.setVisible(isVisible)
+    
+    def _positionWindowBottomRight(self):
+        """Position the window at the bottom-right of the primary screen."""
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            logger.warning("Could not get primary screen, using default position")
+            return
+        
+        screenGeometry = screen.geometry()
+        
+        # Ensure window has a size (use minimum size if not yet set)
+        windowSize = self.size()
+        if windowSize.width() <= 0 or windowSize.height() <= 0:
+            # Use minimum size or default size
+            windowSize = self.minimumSize()
+            if windowSize.width() <= 0 or windowSize.height() <= 0:
+                windowSize = self.sizeHint()
+            if windowSize.width() > 0 and windowSize.height() > 0:
+                self.resize(windowSize)
+        
+        # Calculate bottom-right position
+        x = screenGeometry.width() - windowSize.width()
+        y = screenGeometry.height() - windowSize.height()
+        
+        # Move window to calculated position
+        self.move(x, y)
+        logger.debug(f"Positioned window at bottom-right: ({x}, {y})")
+    
+    def showWindow(self):
+        """Show and position the window at bottom-right."""
+        self._positionWindowBottomRight()
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self._updateTrayMenu()
+        logger.info("Window shown from system tray")
+    
+    def hideWindow(self):
+        """Hide the window to tray."""
+        self.hide()
+        self._updateTrayMenu()
+        logger.info("Window hidden to system tray")
+    
+    def closeEvent(self, event: QCloseEvent):
+        """Override close event to hide window instead of closing."""
+        event.ignore()
+        self.hideWindow()
     
     def selectDirectory(self):
         """Open directory selection dialog."""
@@ -634,7 +764,9 @@ class YouTubeUploaderGUI(QMainWindow):
     
     def run(self):
         """Run the GUI application."""
-        self.show()
+        # Window starts hidden - accessible only through system tray
+        # Don't call self.show() here
+        logger.info("GUI application started (window hidden, accessible via system tray)")
 
 
 def main():
