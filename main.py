@@ -191,7 +191,6 @@ def main():
         
         # Create QApplication first (required before any widgets)
         app = QApplication(sys.argv)
-        # Configure app to not quit when last window closes (for system tray)
         app.setQuitOnLastWindowClosed(False)
         window = YouTubeUploaderGUI()
         window.run()
