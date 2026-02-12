@@ -5,6 +5,8 @@ and monitoring upload progress.
 """
 import logging
 import sys
+import ctypes
+import ctypes.wintypes
 from pathlib import Path
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -12,7 +14,7 @@ from PySide6.QtWidgets import (
     QFileDialog, QProgressDialog, QMessageBox, QTextEdit, QSystemTrayIcon, QMenu
 )
 from PySide6.QtCore import QTimer, Qt, Signal, QObject, QThread
-from PySide6.QtGui import QFont, QIcon, QScreen, QCloseEvent
+from PySide6.QtGui import QFont, QIcon, QScreen, QCloseEvent, QPixmap, QPainter, QColor, QPoint, QPolygon, QPoint, QPolygon
 
 from main import YouTubeUploader
 from fileHandler import NewFileHandler
@@ -123,6 +125,11 @@ class YouTubeUploaderGUI(QMainWindow):
         self.showAction = None
         self.hideAction = None
         self.quitAction = None
+        self.normalIcon = None
+        self.uploadIcon = None
+        self.uploadPulseTimer = None
+        self.pulseOpacity = 0.5
+        self.pulseDirection = 1  # 1 for increasing, -1 for decreasing
         
         # Create signals object for thread-safe communication
         self.signals = StatusSignals()
@@ -268,6 +275,16 @@ class YouTubeUploaderGUI(QMainWindow):
         self.trayIcon.setIcon(icon)
         self.trayIcon.setToolTip("YouTube Uploader")
         
+        # Store the normal icon
+        self.normalIcon = icon
+        
+        # Initialize upload icon (will be created on first upload)
+        self.uploadIcon = None
+        
+        # Set up pulse timer for upload animation
+        self.uploadPulseTimer = QTimer()
+        self.uploadPulseTimer.timeout.connect(self._updateUploadIconAnimation)
+        
         # Create context menu
         trayMenu = QMenu()
         
@@ -293,6 +310,175 @@ class YouTubeUploaderGUI(QMainWindow):
         # Show the tray icon
         self.trayIcon.show()
         logger.info("System tray icon created and shown")
+    
+    def _createUploadIcon(self):
+        """Create a light green upload icon with pulsing animation support."""
+        # Create pixmap at multiple sizes for high DPI support
+        sizes = [16, 32, 64]
+        icon = QIcon()
+        
+        for size in sizes:
+            pixmap = QPixmap(size, size)
+            pixmap.fill(QColor(0, 0, 0, 0))  # Transparent background
+            
+            painter = QPainter(pixmap)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            
+            # Draw light green circle (#90EE90 - light green)
+            lightGreen = QColor(144, 238, 144)  # #90EE90
+            painter.setBrush(lightGreen)
+            painter.setPen(QColor(0, 0, 0, 0))  # No border
+            
+            # Draw circle with some padding
+            padding = 2
+            painter.drawEllipse(padding, padding, size - 2 * padding, size - 2 * padding)
+            
+            # Draw upload arrow (white or darker green)
+            arrowColor = QColor(255, 255, 255)  # White arrow
+            painter.setPen(arrowColor)
+            painter.setBrush(arrowColor)
+            
+            # Draw upward arrow in center
+            centerX = size // 2
+            centerY = size // 2
+            arrowSize = size // 4
+            
+            # Create arrow path (triangle pointing up)
+            arrow = QPolygon([
+                QPoint(centerX, centerY - arrowSize // 2),  # Top point
+                QPoint(centerX - arrowSize // 2, centerY + arrowSize // 4),  # Bottom left
+                QPoint(centerX + arrowSize // 2, centerY + arrowSize // 4),  # Bottom right
+            ])
+            painter.drawPolygon(arrow)
+            
+            painter.end()
+            
+            icon.addPixmap(pixmap)
+        
+        return icon
+    
+    def _updateUploadIconAnimation(self):
+        """Update the upload icon with pulsing animation."""
+        # Update opacity based on direction
+        opacityStep = 0.1
+        minOpacity = 0.3
+        maxOpacity = 1.0
+        
+        self.pulseOpacity += opacityStep * self.pulseDirection
+        
+        # Reverse direction at boundaries
+        if self.pulseOpacity >= maxOpacity:
+            self.pulseOpacity = maxOpacity
+            self.pulseDirection = -1
+        elif self.pulseOpacity <= minOpacity:
+            self.pulseOpacity = minOpacity
+            self.pulseDirection = 1
+        
+        # Create animated icon with current opacity
+        sizes = [16, 32, 64]
+        animatedIcon = QIcon()
+        
+        for size in sizes:
+            pixmap = QPixmap(size, size)
+            pixmap.fill(QColor(0, 0, 0, 0))  # Transparent background
+            
+            painter = QPainter(pixmap)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            
+            # Draw light green circle with opacity
+            lightGreen = QColor(144, 238, 144)  # #90EE90
+            lightGreen.setAlphaF(self.pulseOpacity)
+            painter.setBrush(lightGreen)
+            painter.setPen(QColor(0, 0, 0, 0))  # No border
+            
+            # Draw circle with some padding
+            padding = 2
+            painter.drawEllipse(padding, padding, size - 2 * padding, size - 2 * padding)
+            
+            # Draw upload arrow (white with opacity)
+            arrowColor = QColor(255, 255, 255)
+            arrowColor.setAlphaF(self.pulseOpacity)
+            painter.setPen(arrowColor)
+            painter.setBrush(arrowColor)
+            
+            # Draw upward arrow in center
+            centerX = size // 2
+            centerY = size // 2
+            arrowSize = size // 4
+            
+            # Create arrow path (triangle pointing up)
+            arrow = QPolygon([
+                QPoint(centerX, centerY - arrowSize // 2),  # Top point
+                QPoint(centerX - arrowSize // 2, centerY + arrowSize // 4),  # Bottom left
+                QPoint(centerX + arrowSize // 2, centerY + arrowSize // 4),  # Bottom right
+            ])
+            painter.drawPolygon(arrow)
+            
+            painter.end()
+            
+            animatedIcon.addPixmap(pixmap)
+        
+        # Update tray icon
+        if self.trayIcon:
+            self.trayIcon.setIcon(animatedIcon)
+    
+    def _makeTrayIconAlwaysVisible(self):
+        """Use Windows API to try to keep the tray icon always visible."""
+        if sys.platform != 'win32':
+            # Only works on Windows
+            return
+        
+        try:
+            # Windows API constants
+            NIM_SETVERSION = 0x00000004
+            NOTIFYICON_VERSION_4 = 4
+            
+            # Get the window handle (HWND) from Qt
+            hwnd = int(self.winId())
+            
+            # Load shell32.dll
+            shell32 = ctypes.windll.shell32
+            
+            # Define NOTIFYICONDATA structure
+            class NOTIFYICONDATA(ctypes.Structure):
+                _fields_ = [
+                    ("cbSize", ctypes.wintypes.DWORD),
+                    ("hWnd", ctypes.wintypes.HWND),
+                    ("uID", ctypes.c_uint),
+                    ("uFlags", ctypes.c_uint),
+                    ("uCallbackMessage", ctypes.c_uint),
+                    ("hIcon", ctypes.wintypes.HANDLE),
+                    ("szTip", ctypes.c_char * 128),
+                    ("dwState", ctypes.wintypes.DWORD),
+                    ("dwStateMask", ctypes.wintypes.DWORD),
+                    ("szInfo", ctypes.c_char * 256),
+                    ("uVersion", ctypes.c_uint),
+                    ("szInfoTitle", ctypes.c_char * 64),
+                    ("dwInfoFlags", ctypes.wintypes.DWORD),
+                    ("guidItem", ctypes.c_char * 16),
+                    ("hBalloonIcon", ctypes.wintypes.HANDLE),
+                ]
+            
+            # Create NOTIFYICONDATA structure
+            nid = NOTIFYICONDATA()
+            nid.cbSize = ctypes.sizeof(NOTIFYICONDATA)
+            nid.hWnd = hwnd
+            nid.uID = 1  # Icon ID
+            nid.uVersion = NOTIFYICON_VERSION_4
+            
+            # Call Shell_NotifyIcon with NIM_SETVERSION
+            result = shell32.Shell_NotifyIconW(NIM_SETVERSION, ctypes.byref(nid))
+            
+            if result:
+                logger.info("Successfully set tray icon to version 4 (always visible)")
+            else:
+                logger.warning("Failed to set tray icon version (may still be hidden)")
+                
+        except Exception as e:
+            logger.warning(f"Could not set tray icon to always visible: {e}")
+            # Fallback: Try to keep icon active by updating tooltip
+            if self.trayIcon:
+                self.trayIcon.setToolTip("YouTube Uploader - Uploading...")
     
     def _onTrayIconActivated(self, reason):
         """Handle tray icon activation (left-click to show window, double-click to toggle)."""
@@ -362,6 +548,10 @@ class YouTubeUploaderGUI(QMainWindow):
     
     def closeEvent(self, event: QCloseEvent):
         """Override close event to hide window instead of closing."""
+        # Stop animation timer if running
+        if self.uploadPulseTimer and self.uploadPulseTimer.isActive():
+            self.uploadPulseTimer.stop()
+        
         event.ignore()
         self.hideWindow()
     
@@ -546,11 +736,39 @@ class YouTubeUploaderGUI(QMainWindow):
             # Update status display for upload
             if self.currentFile:
                 self.progressLabel.setText("Preparing upload...")
-        elif status == "finished":
-            # Update status display after upload completes
-            self.progressLabel.setText("Upload complete!")
-            # Reset after a moment
-            QTimer.singleShot(5000, self._resetUploadStatus)
+            
+            # Update tray icon to upload icon with animation
+            if self.trayIcon:
+                # Create upload icon if not already created
+                if self.uploadIcon is None:
+                    self.uploadIcon = self._createUploadIcon()
+                
+                # Start pulse animation (every 150ms)
+                self.pulseOpacity = 0.5  # Start at mid-brightness
+                self.pulseDirection = 1  # Start increasing
+                self.uploadPulseTimer.start(150)
+                
+                # Set initial upload icon
+                self.trayIcon.setIcon(self.uploadIcon)
+                
+                # Try to make icon always visible
+                self._makeTrayIconAlwaysVisible()
+                
+                logger.info("Tray icon changed to upload mode (light green, animated)")
+        elif status == "finished" or status == "idle":
+            # Stop animation and restore normal icon
+            if self.uploadPulseTimer and self.uploadPulseTimer.isActive():
+                self.uploadPulseTimer.stop()
+            
+            if self.trayIcon and self.normalIcon:
+                self.trayIcon.setIcon(self.normalIcon)
+                logger.info("Tray icon restored to normal mode")
+            
+            if status == "finished":
+                # Update status display after upload completes
+                self.progressLabel.setText("Upload complete!")
+                # Reset after a moment
+                QTimer.singleShot(5000, self._resetUploadStatus)
         
         self.updateStatusDisplay()
     
@@ -699,6 +917,25 @@ class YouTubeUploaderGUI(QMainWindow):
         self.updateStatusDisplay()
         self.progressLabel.setText("Preparing upload...")
         
+        # Update tray icon to upload icon with animation
+        if self.trayIcon:
+            # Create upload icon if not already created
+            if self.uploadIcon is None:
+                self.uploadIcon = self._createUploadIcon()
+            
+            # Start pulse animation (every 150ms)
+            self.pulseOpacity = 0.5  # Start at mid-brightness
+            self.pulseDirection = 1  # Start increasing
+            self.uploadPulseTimer.start(150)
+            
+            # Set initial upload icon
+            self.trayIcon.setIcon(self.uploadIcon)
+            
+            # Try to make icon always visible
+            self._makeTrayIconAlwaysVisible()
+            
+            logger.info("Tray icon changed to upload mode for direct upload (light green, animated)")
+        
         # Start upload in background thread
         self.uploadThread.start()
     
@@ -720,6 +957,14 @@ class YouTubeUploaderGUI(QMainWindow):
         self.uploadingFiles.discard(normalizedPath)
         
         logger.info(f"Direct upload completed: {filePath} -> {videoId}")
+        
+        # Stop animation and restore normal icon
+        if self.uploadPulseTimer and self.uploadPulseTimer.isActive():
+            self.uploadPulseTimer.stop()
+        
+        if self.trayIcon and self.normalIcon:
+            self.trayIcon.setIcon(self.normalIcon)
+            logger.info("Tray icon restored to normal mode after direct upload")
         
         # Update status display
         self.currentStatus = "finished"
@@ -748,6 +993,14 @@ class YouTubeUploaderGUI(QMainWindow):
         self.uploadingFiles.discard(normalizedPath)
         
         logger.error(f"Direct upload failed: {filePath} - {errorMsg}")
+        
+        # Stop animation and restore normal icon
+        if self.uploadPulseTimer and self.uploadPulseTimer.isActive():
+            self.uploadPulseTimer.stop()
+        
+        if self.trayIcon and self.normalIcon:
+            self.trayIcon.setIcon(self.normalIcon)
+            logger.info("Tray icon restored to normal mode after upload error")
         
         # Update status display
         self.currentStatus = "idle"
