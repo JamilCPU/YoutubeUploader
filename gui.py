@@ -849,7 +849,7 @@ class YouTubeUploaderGUI(QMainWindow):
     def updateFileSize(self):
         """Manually update file size (called by timer)."""
         if self.eventHandler and self.eventHandler.currentFilePath:
-            size = self.eventHandler.getFileSize()
+            size = self.eventHandler.getFileSize(self.eventHandler.currentFilePath)
             if size is not None:
                 logger.debug(f"Timer-based file size update: {self.eventHandler.currentFilePath} = {size} bytes")
                 self.currentFileSize = size

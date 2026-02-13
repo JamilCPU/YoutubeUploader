@@ -54,28 +54,27 @@ class NewFileHandler(FileSystemEventHandler):
         with self.lock:
             return self.currentFile
     
-    def getFileSize(self):
+    def getFileSize(self, filePath):
         """
-        Get the current size of the file being tracked.
+        Get the size of the specified file.
+        
+        Args:
+            filePath: Path to the file (string or Path object)
         
         Returns:
-            File size in bytes, or None if no file is being tracked
+            File size in bytes, or None if file doesn't exist or error occurs
         """
-        with self.lock:
-            if self.currentFile is None:
-                return None
-            
-            try:
-                filePath = Path(self.currentFile)
-                if filePath.exists():
-                    size = filePath.stat().st_size
-                    logger.debug(f"File size check: {self.currentFile} = {size} bytes")
-                    return size
-                logger.warning(f"File does not exist: {self.currentFile}")
-                return None
-            except Exception as e:
-                logger.error(f"Error getting file size for {self.currentFile}: {e}")
-                return None
+        try:
+            filePathObj = Path(filePath)
+            if filePathObj.exists():
+                size = filePathObj.stat().st_size
+                logger.debug(f"File size check: {filePath} = {size} bytes")
+                return size
+            logger.warning(f"File does not exist: {filePath}")
+            return None
+        except Exception as e:
+            logger.error(f"Error getting file size for {filePath}: {e}")
+            return None
     
     def setFileToTrack(self, filePath):
         """
@@ -123,7 +122,7 @@ class NewFileHandler(FileSystemEventHandler):
         
         # Get initial file size
         if fileSizeCallback:
-            size = self.getFileSize()
+            size = self.getFileSize(filePath)
             if size is not None:
                 logger.info(f"Initial file size: {filePath} = {size} bytes")
                 fileSizeCallback(filePath, size)
@@ -148,11 +147,12 @@ class NewFileHandler(FileSystemEventHandler):
         # Also update file size if callback is available
         if self.fileSizeCallback:
             with self.lock:
-                if self.currentFile is not None:
-                    size = self.getFileSize()
-                    if size is not None:
-                        logger.debug(f"Manual file size update: {self.currentFile} = {size} bytes")
-                        self.fileSizeCallback(self.currentFile, size)
+                currentFile = self.currentFile
+            if currentFile is not None:
+                size = self.getFileSize(currentFile)
+                if size is not None:
+                    logger.debug(f"Manual file size update: {currentFile} = {size} bytes")
+                    self.fileSizeCallback(currentFile, size)
     
     def _pollFile(self):
         """
@@ -177,7 +177,7 @@ class NewFileHandler(FileSystemEventHandler):
                     # Call callback outside lock to prevent blocking
                     if fileSizeCallback and currentFile is not None:
                         try:
-                            size = self.getFileSize()
+                            size = self.getFileSize(currentFile)
                             if size is not None:
                                 logger.debug(f"Periodic file size update: {currentFile} = {size} bytes")
                                 fileSizeCallback(currentFile, size)
@@ -193,54 +193,93 @@ class NewFileHandler(FileSystemEventHandler):
         If modified, wait another checkInterval.
         If not modified, proceed with upload.
         """
+        logger.info("_checkFile() ENTRY - function called")
+        
         # Get file path outside lock to avoid holding lock during I/O
         currentFile = None
         lastModified = None
         lastCheckTime = None
-        with self.lock:
-            if self.currentFile is None:
-                logger.info("No file being tracked, skipping check")
-                return  # No file being tracked
-            currentFile = self.currentFile
-            lastModified = self.lastModified
-            lastCheckTime = self.lastCheckTime
         
-        logger.info(f"Checking file: {currentFile}")
+        logger.info("_checkFile() - About to acquire first lock")
+        try:
+            with self.lock:
+                logger.info(f"_checkFile() - Lock acquired. self.currentFile = {self.currentFile}")
+                if self.currentFile is None:
+                    logger.info("_checkFile() - No file being tracked, skipping check")
+                    logger.info("_checkFile() - Returning early (no file)")
+                    return  # No file being tracked
+                
+                logger.info(f"_checkFile() - File is being tracked: {self.currentFile}")
+                currentFile = self.currentFile
+                lastModified = self.lastModified
+                lastCheckTime = self.lastCheckTime
+                logger.info(f"_checkFile() - Retrieved values: currentFile={currentFile}, lastModified={lastModified}, lastCheckTime={lastCheckTime}")
+        except Exception as e:
+            logger.error(f"_checkFile() - Exception acquiring first lock: {e}", exc_info=True)
+            return
+        
+        logger.info(f"_checkFile() - First lock released. Checking file: {currentFile}")
         
         # Perform file I/O operations outside the lock (these can be slow)
+        logger.info(f"_checkFile() - Starting file I/O operations for: {currentFile}")
         try:
+            logger.info(f"_checkFile() - Creating Path object for: {currentFile}")
             filePath = Path(currentFile)
+            logger.info(f"_checkFile() - Path object created: {filePath}")
+            
+            logger.info(f"_checkFile() - Checking if file exists: {filePath}")
             if not filePath.exists():
-                logger.warning(f"File no longer exists: {currentFile}")
+                logger.warning(f"_checkFile() - File no longer exists: {currentFile}")
+                logger.info("_checkFile() - Returning early (file doesn't exist)")
                 return
             
+            logger.info(f"_checkFile() - File exists. Getting modification time...")
             # Get the file's actual modification time (I/O operation - do outside lock)
             actualModTime = filePath.stat().st_mtime
+            logger.info(f"_checkFile() - Got actualModTime: {actualModTime}")
+            
             currentTime = time.time()
             timeSinceLastMod = currentTime - actualModTime
+            logger.info(f"_checkFile() - currentTime={currentTime}, timeSinceLastMod={timeSinceLastMod:.1f}s")
             
-            logger.debug(f"Checking file: {currentFile}, actualModTime={actualModTime}, lastCheckTime={lastCheckTime}, lastModified={lastModified}")
+            logger.info(f"_checkFile() - File stats: actualModTime={actualModTime}, lastModified={lastModified}, lastCheckTime={lastCheckTime}")
             
             # Now acquire lock only for state updates
+            logger.info("_checkFile() - About to acquire second lock for state updates")
             with self.lock:
+                logger.info("_checkFile() - Second lock acquired")
                 # Re-check if file is still being tracked (might have changed)
+                logger.info(f"_checkFile() - Re-checking: self.currentFile={self.currentFile}, currentFile={currentFile}")
                 if self.currentFile != currentFile:
+                    logger.info(f"_checkFile() - File changed during check, returning early")
+                    logger.info("_checkFile() - Returning early (file changed)")
                     return
+                
+                logger.info(f"_checkFile() - File still matches. Comparing mod times...")
+                logger.info(f"_checkFile() - Comparison: actualModTime={actualModTime} > lastModified={self.lastModified} = {actualModTime > self.lastModified}")
                 
                 # Check if file was modified since we last checked
                 # Compare actual file mod time with last known mod time
                 if actualModTime > self.lastModified:
+                    logger.info(f"_checkFile() - File WAS modified. Updating state...")
                     # File was modified, update mod time and check time, wait another interval
                     self.lastModified = actualModTime
                     self.lastCheckTime = currentTime
+                    logger.info(f"_checkFile() - State updated: lastModified={self.lastModified}, lastCheckTime={self.lastCheckTime}")
                     logger.info(f"File still being written: {currentFile} (modified {timeSinceLastMod:.1f}s ago, will check again in {self.checkInterval}s)")
                     print(f"File still being written: {currentFile}")
                     print(f"  Last modified: {timeSinceLastMod:.1f}s ago, will check again in {self.checkInterval} seconds")
+                    logger.info("_checkFile() - Returning (file still being written)")
                 else:
+                    logger.info(f"_checkFile() - File was NOT modified. Checking file size...")
                     # File hasn't been modified, but check if it's actually been written to
                     # If file was just created and never modified, it might be empty or not ready
-                    fileSize = self.getFileSize()
+                    logger.info("_checkFile() - Calling getFileSize()...")
+                    fileSize = self.getFileSize(currentFile)
+                    logger.info(f"_checkFile() - getFileSize() returned: {fileSize}")
+                    
                     if fileSize is not None and fileSize > 0:
+                        logger.info(f"_checkFile() - File has content (size={fileSize} bytes). File is finished!")
                         # File has content and hasn't been modified - it's finished
                         finishedFilePath = self.currentFile
                         self.currentFile = None
@@ -248,17 +287,30 @@ class NewFileHandler(FileSystemEventHandler):
                         self.lastCheckTime = None
                         self._status = "finished"
                         
+                        logger.info(f"_checkFile() - State cleared. Calling _onFileFinished()...")
                         logger.info(f"File finished writing: {finishedFilePath} (no modifications for {timeSinceLastMod:.1f}s, size={fileSize} bytes)")
                         print(f"File finished! No modifications for {timeSinceLastMod:.1f}s")
                         # Process outside the lock
+                        logger.info(f"_checkFile() - About to call _onFileFinished({finishedFilePath})")
                         self._onFileFinished(finishedFilePath)
+                        logger.info(f"_checkFile() - _onFileFinished() completed")
                     else:
+                        logger.info(f"_checkFile() - File appears empty (size={fileSize}). Waiting another interval.")
                         # File is empty or doesn't exist - wait another interval
-                        logger.debug(f"File appears empty or doesn't exist, waiting another interval: {currentFile}")
+                        logger.info(f"File appears empty or doesn't exist, waiting another interval: {currentFile}")
                         self.lastCheckTime = currentTime
+                        logger.info(f"_checkFile() - Updated lastCheckTime to {self.lastCheckTime}")
+                
+                logger.info("_checkFile() - Second lock about to be released")
+            logger.info("_checkFile() - Second lock released")
+            
         except Exception as e:
-            logger.error(f"Error checking file {currentFile}: {e}", exc_info=True)
+            logger.error(f"_checkFile() - Exception in file I/O or state update: {e}", exc_info=True)
+            logger.error(f"_checkFile() - Exception details: currentFile={currentFile}")
+            logger.info("_checkFile() - Returning due to exception")
             return
+        
+        logger.info("_checkFile() - EXIT - function completed successfully")
     
     def _onFileFinished(self, filePath):
         """
@@ -375,7 +427,7 @@ class NewFileHandler(FileSystemEventHandler):
             
             # Get initial file size
             if fileSizeCallback:
-                size = self.getFileSize()
+                size = self.getFileSize(filePath)
                 if size is not None:
                     logger.info(f"Initial file size from directory watch: {filePath} = {size} bytes")
                     fileSizeCallback(filePath, size)
@@ -400,7 +452,7 @@ class NewFileHandler(FileSystemEventHandler):
                     
                     # Optionally update file size on modification
                     if self.fileSizeCallback:
-                        size = self.getFileSize()
+                        size = self.getFileSize(filePath)
                         if size is not None:
                             logger.debug(f"File size update from modification event: {filePath} = {size} bytes")
                             self.fileSizeCallback(filePath, size)
