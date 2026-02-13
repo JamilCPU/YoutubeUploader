@@ -159,24 +159,33 @@ class NewFileHandler(FileSystemEventHandler):
         Background thread that checks the file every checkInterval seconds.
         """
         logger.info(f"Polling thread started (checkInterval={self.checkInterval}s)")
-        while self.running:
-            time.sleep(self.checkInterval)
-            if self.running:  # Check again in case we stopped during sleep
-                logger.debug(f"Performing periodic check (interval={self.checkInterval}s)")
-                self._checkFile()
-                # Update file size callback every check interval
-                # Get file info outside lock to avoid blocking
-                fileSizeCallback = self.fileSizeCallback
-                currentFile = None
-                with self.lock:
-                    currentFile = self.currentFile
-                
-                # Call callback outside lock to prevent blocking
-                if fileSizeCallback and currentFile is not None:
-                    size = self.getFileSize()
-                    if size is not None:
-                        logger.debug(f"Periodic file size update: {currentFile} = {size} bytes")
-                        fileSizeCallback(currentFile, size)
+        try:
+            while self.running:
+                time.sleep(self.checkInterval)
+                if self.running:  # Check again in case we stopped during sleep
+                    logger.info(f"Performing periodic check (interval={self.checkInterval}s)")
+                    fileStatus =self._checkFile()
+                    logger.info(f"File checked.")
+                    logger.info(fileStatus)
+                    # Update file size callback every check interval
+                    # Get file info outside lock to avoid blocking
+                    fileSizeCallback = self.fileSizeCallback
+                    currentFile = None
+                    with self.lock:
+                        currentFile = self.currentFile
+                    
+                    # Call callback outside lock to prevent blocking
+                    if fileSizeCallback and currentFile is not None:
+                        try:
+                            size = self.getFileSize()
+                            if size is not None:
+                                logger.debug(f"Periodic file size update: {currentFile} = {size} bytes")
+                                fileSizeCallback(currentFile, size)
+                        except Exception as e:
+                            logger.error(f"Error updating file size in polling thread: {e}", exc_info=True)
+        except Exception as e:
+            logger.error(f"Polling thread error: {e}", exc_info=True)
+            logger.error("Polling thread has stopped - file monitoring may not work correctly")
     
     def _checkFile(self):
         """
@@ -190,11 +199,13 @@ class NewFileHandler(FileSystemEventHandler):
         lastCheckTime = None
         with self.lock:
             if self.currentFile is None:
-                logger.debug("No file being tracked, skipping check")
+                logger.info("No file being tracked, skipping check")
                 return  # No file being tracked
             currentFile = self.currentFile
             lastModified = self.lastModified
             lastCheckTime = self.lastCheckTime
+        
+        logger.info(f"Checking file: {currentFile}")
         
         # Perform file I/O operations outside the lock (these can be slow)
         try:
@@ -325,6 +336,19 @@ class NewFileHandler(FileSystemEventHandler):
             logger.info(f"New file created (directory watch): {filePath}")
             print(f"Recording started: {filePath}")
             
+            # Get the file's actual modification time (I/O operation - do outside lock)
+            try:
+                filePathObj = Path(filePath)
+                if not filePathObj.exists():
+                    logger.warning(f"File does not exist yet: {filePath}, will retry on next check")
+                    return
+                
+                actualModTime = filePathObj.stat().st_mtime
+            except Exception as e:
+                logger.error(f"Error getting file modification time for {filePath}: {e}")
+                # Continue anyway - will be caught on next check
+                actualModTime = time.time()
+            
             with self.lock:
                 # If we're already tracking a file, warn and replace it
                 if self.currentFile is not None:
@@ -334,22 +358,31 @@ class NewFileHandler(FileSystemEventHandler):
                 # Start tracking this file with current timestamp
                 currentTime = time.time()
                 self.currentFile = filePath
-                self.lastModified = currentTime
-                self.lastCheckTime = currentTime
+                self.lastModified = actualModTime  # Use actual file modification time
+                self.lastCheckTime = currentTime  # Use current time for check reference
                 self._status = "watching"
                 
-                logger.info(f"Started tracking file from directory watch: {filePath} (checkInterval={self.checkInterval}s)")
+                logger.info(f"Started tracking file from directory watch: {filePath} (checkInterval={self.checkInterval}s, modTime={actualModTime})")
                 print(f"Tracking file. Will check in {self.checkInterval} seconds if recording is finished.")
                 
-                if self.statusCallback:
-                    self.statusCallback("watching")
-                
-                # Get initial file size
-                if self.fileSizeCallback:
-                    size = self.getFileSize()
-                    if size is not None:
-                        logger.info(f"Initial file size from directory watch: {filePath} = {size} bytes")
-                        self.fileSizeCallback(filePath, size)
+                # Get callbacks outside lock to avoid blocking
+                statusCallback = self.statusCallback
+                fileSizeCallback = self.fileSizeCallback
+            
+            # Call callbacks outside the lock to prevent blocking
+            if statusCallback:
+                statusCallback("watching")
+            
+            # Get initial file size
+            if fileSizeCallback:
+                size = self.getFileSize()
+                if size is not None:
+                    logger.info(f"Initial file size from directory watch: {filePath} = {size} bytes")
+                    fileSizeCallback(filePath, size)
+            
+            # Immediately check the file to verify it's being tracked correctly
+            logger.info(f"Performing immediate check on newly detected file: {filePath}")
+            self._checkFile()
     
     def on_modified(self, event):
         """

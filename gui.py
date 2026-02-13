@@ -13,11 +13,12 @@ from PySide6.QtWidgets import (
     QPushButton, QLabel, QRadioButton, QButtonGroup, QGroupBox,
     QFileDialog, QProgressDialog, QMessageBox, QTextEdit, QSystemTrayIcon, QMenu
 )
-from PySide6.QtCore import QTimer, Qt, Signal, QObject, QThread
-from PySide6.QtGui import QFont, QIcon, QScreen, QCloseEvent, QPixmap, QPainter, QColor, QPoint, QPolygon, QPoint, QPolygon
+from PySide6.QtCore import QTimer, Qt, Signal, QObject, QThread, QPoint
+from PySide6.QtGui import QFont, QIcon, QScreen, QCloseEvent, QPixmap, QPainter, QColor, QPolygon
 
 from main import YouTubeUploader
 from fileHandler import NewFileHandler
+from config import loadConfig, saveConfig
 
 # Set up logger
 logger = logging.getLogger(__name__)
@@ -140,6 +141,10 @@ class YouTubeUploaderGUI(QMainWindow):
         # Initialize uploader
         self.uploader = YouTubeUploader(guiMode=True)
         
+        # Load config (creates config.json if missing)
+        config = loadConfig()
+        lastDirectory = config.get('lastDirectory')
+        
         # Set up UI
         self.initUI()
         
@@ -150,6 +155,22 @@ class YouTubeUploaderGUI(QMainWindow):
         self.sizeUpdateTimer = QTimer()
         self.sizeUpdateTimer.timeout.connect(self.updateFileSize)
         self.sizeUpdateTimer.start(300000)  # 5 minutes
+        
+        # Auto-start watching last directory if it exists and is valid
+        if lastDirectory:
+            try:
+                dirPath = Path(lastDirectory)
+                if dirPath.exists() and dirPath.is_dir():
+                    logger.info(f"Restoring last watched directory: {dirPath}")
+                    self.selectedPath = dirPath
+                    self.pathLabel.setText(f"Directory: {self.selectedPath}")
+                    self.directoryRadio.setChecked(True)
+                    # Automatically start watching
+                    self._autoStartWatching()
+                else:
+                    logger.warning(f"Last directory from config does not exist or is not a directory: {lastDirectory}")
+            except Exception as e:
+                logger.error(f"Error restoring last directory: {e}", exc_info=True)
     
     def initUI(self):
         """Initialize the user interface."""
@@ -568,6 +589,7 @@ class YouTubeUploaderGUI(QMainWindow):
             logger.info(f"Directory selected: {self.selectedPath}")
             self.pathLabel.setText(f"Directory: {self.selectedPath}")
             self.directoryRadio.setChecked(True)
+            saveConfig(self.selectedPath)
         else:
             logger.debug("Directory selection cancelled")
     
@@ -588,6 +610,44 @@ class YouTubeUploaderGUI(QMainWindow):
         else:
             logger.debug("File selection cancelled")
     
+    def _autoStartWatching(self):
+        """Automatically start watching the selected directory (called on startup)."""
+        if not hasattr(self, 'selectedPath') or not self.selectedPath:
+            logger.debug("No directory to auto-start watching")
+            return
+        
+        try:
+            # Only auto-start directory watching (not file watching)
+            if not self.directoryRadio.isChecked():
+                logger.debug("Auto-start only supports directory mode")
+                return
+            
+            logger.info(f"Auto-starting directory watch mode: {self.selectedPath}")
+            # Save directory to config when starting watch
+            saveConfig(self.selectedPath)
+            self.uploader.startWatchingDirectory(
+                str(self.selectedPath),
+                statusCallback=self._statusCallback,
+                fileSizeCallback=self._fileSizeCallback,
+                progressCallback=self._progressCallback
+            )
+            self.observer = self.uploader.observer
+            self.eventHandler = self.uploader.eventHandler
+            logger.info(f"Directory watch auto-started successfully: {self.selectedPath}")
+            
+            # Update UI state
+            self.startBtn.setEnabled(False)
+            self.stopBtn.setEnabled(True)
+            self.checkNowBtn.setEnabled(True)
+            self.selectDirectoryBtn.setEnabled(False)
+            self.selectFileBtn.setEnabled(False)
+            self.directoryRadio.setEnabled(False)
+            self.fileRadio.setEnabled(False)
+            
+        except Exception as e:
+            logger.error(f"Failed to auto-start watching: {str(e)}", exc_info=True)
+            # Don't show error message for auto-start failures
+    
     def startWatching(self):
         """Start watching the selected file or directory."""
         if not hasattr(self, 'selectedPath'):
@@ -599,6 +659,8 @@ class YouTubeUploaderGUI(QMainWindow):
             if self.directoryRadio.isChecked():
                 # Directory watching mode
                 logger.info(f"Starting directory watch mode: {self.selectedPath}")
+                # Save directory to config when starting watch
+                saveConfig(self.selectedPath)
                 self.uploader.startWatchingDirectory(
                     str(self.selectedPath),
                     statusCallback=self._statusCallback,
