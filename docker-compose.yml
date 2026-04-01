@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  youtube-uploader:
+    build: .
+    platform: windows/amd64
+    volumes:
+      # Mount watched directory (adjust host path as needed)
+      - type: bind
+        source: F:\Recordings
+        target: C:\watch
+      # Mount data directory for config.json and token.json persistence
+      - type: bind
+        source: .\data
+        target: C:\data
+    environment:
+      - YOUTUBE_CLIENT_ID=${YOUTUBE_CLIENT_ID}
+      - YOUTUBE_CLIENT_SECRET=${YOUTUBE_CLIENT_SECRET}
+      - YOUTUBE_PROJECT_ID=${YOUTUBE_PROJECT_ID}
+      - DATA_DIR=C:\data
+      - WATCH_DIR=C:\watch
+    restart: unless-stopped
+    # Uncomment the following lines to run in GUI mode
+    # command: ["python", "main.py", "--gui"]

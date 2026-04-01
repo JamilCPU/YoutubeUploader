@@ -24,14 +24,19 @@ class Uploader:
     # YouTube API scopes required for uploading videos
     SCOPES = ['https://www.googleapis.com/auth/youtube.upload']
     
-    def __init__(self, tokenFile='token.json', progressCallback=None):
+    def __init__(self, tokenFile=None, progressCallback=None):
         """
         Initialize the YouTube uploader.
         
         Args:
-            tokenFile: Path to store/load OAuth token
+            tokenFile: Path to store/load OAuth token (default: uses DATA_DIR/token.json or ./token.json)
             progressCallback: Callback function(progress) called with upload progress (0-100)
         """
+        import os
+        if tokenFile is None:
+            # Use DATA_DIR environment variable if set (for Docker), otherwise use current directory
+            dataDir = Path(os.getenv('DATA_DIR', '.'))
+            tokenFile = dataDir / 'token.json'
         self.tokenFile = Path(tokenFile)
         self.youtubeService = None
         self.credentials = None
