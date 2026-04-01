@@ -4,10 +4,14 @@ Handles persistence of application settings in config.json.
 """
 import json
 import logging
+import os
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
-CONFIG_FILE = Path('config.json')
+
+# Use DATA_DIR environment variable if set (for Docker), otherwise use current directory
+DATA_DIR = Path(os.getenv('DATA_DIR', '.'))
+CONFIG_FILE = DATA_DIR / 'config.json'
 
 
 def loadConfig():

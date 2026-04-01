@@ -21,12 +21,18 @@ class YouTubeUploader:
         Initialize the YouTube uploader.
         
         Args:
-            watchDirectory: Directory to watch for new files (default: ~/Videos)
+            watchDirectory: Directory to watch for new files (default: uses WATCH_DIR env var or F:\Recordings)
             checkInterval: Seconds between checks for finished files (default: 300 = 5 minutes)
             guiMode: If True, start() returns immediately without blocking (for GUI)
         """
+        import os
         if watchDirectory is None:
-            watchDirectory = Path(r"F:\Recordings")
+            # Use WATCH_DIR environment variable if set (for Docker), otherwise use default
+            watchDir = os.getenv('WATCH_DIR')
+            if watchDir:
+                watchDirectory = Path(watchDir)
+            else:
+                watchDirectory = Path(r"F:\Recordings")
         
         self.watchDirectory = Path(watchDirectory)
         self.checkInterval = checkInterval
